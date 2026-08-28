@@ -22,8 +22,10 @@ Command makeFileCommand(const FileResultEntry& entry, int weight)
 {
     const DWORD attributes = GetFileAttributesW(entry.path.c_str());
     const bool folder = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
-    return makeCommand(folder ? CommandKind::Folder : CommandKind::File,
-                       fileNameFromPath(entry.path), fileEntrySubtitle(entry), entry.path, weight);
+    Command command = makeCommand(folder ? CommandKind::Folder : CommandKind::File,
+                                  fileNameFromPath(entry.path), fileEntrySubtitle(entry), entry.path, weight);
+    command.data = entry.path;
+    return command;
 }
 
 bool isPathQuery(const std::wstring& query)
@@ -111,6 +113,7 @@ bool addPathBrowseResults(const std::wstring& query, ResultSink& sink)
         const FileResultEntry file = fileEntryFromPath(entry.path.wstring());
         Command command = makeCommand(entry.folder ? CommandKind::Folder : CommandKind::File,
                                       fileNameFromPath(file.path), fileEntrySubtitle(file), file.path, 7200 - rank);
+        command.data = file.path;
         sink.add(std::move(command), 18000 - rank);
         ++rank;
     }

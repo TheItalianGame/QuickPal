@@ -451,8 +451,7 @@ FileResultEntry fileEntryFromPath(const std::wstring& path)
 
 std::wstring fileEntrySubtitle(const FileResultEntry& entry)
 {
-    std::wstring subtitle = entry.path;
-    subtitle += L" | ";
+    std::wstring subtitle;
     subtitle += entry.sizeText.empty() ? L"-" : entry.sizeText;
     subtitle += L" | ";
     subtitle += entry.modifiedText.empty() ? L"-" : entry.modifiedText;

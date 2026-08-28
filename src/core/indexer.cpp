@@ -118,7 +118,9 @@ void scanFilesRecursive(const fs::path& root, std::vector<Command>& out, std::un
                 {
                     continue;
                 }
-                out.push_back(makeCommand(CommandKind::Folder, name, L"Indexed folder", path.wstring(), 1800));
+                Command command = makeCommand(CommandKind::Folder, name, L"Indexed folder", path.wstring(), 1800);
+                command.data = path.wstring();
+                out.push_back(std::move(command));
                 scanFilesRecursive(path, out, seenPaths, depth + 1, maxDepth, maxItems);
             }
         }
@@ -128,7 +130,9 @@ void scanFilesRecursive(const fs::path& root, std::vector<Command>& out, std::un
             {
                 continue;
             }
-            out.push_back(makeCommand(CommandKind::File, name, L"Indexed file", path.wstring(), 1600));
+            Command command = makeCommand(CommandKind::File, name, L"Indexed file", path.wstring(), 1600);
+            command.data = path.wstring();
+            out.push_back(std::move(command));
         }
     }
 }

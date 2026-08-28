@@ -129,6 +129,23 @@ const wchar_t* actionHint(CommandKind kind)
     }
 }
 
+bool usesDetailRows()
+{
+    if (g_app.queryMode == QueryMode::Files)
+    {
+        return true;
+    }
+    for (const auto& result : g_app.results)
+    {
+        const CommandKind kind = result.command.kind;
+        if ((kind == CommandKind::File || kind == CommandKind::Folder) && !result.command.data.empty())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void drawPill(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, const D2D1_RECT_F& anchor, const std::wstring& text)
 {
     if (text.empty())
@@ -338,6 +355,11 @@ void paintPalette(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, cons
         const std::wstring& subtitle = command.subtitle.empty() ? command.arg : command.subtitle;
         drawText(rt, gfx, subtitle, r.subtitle, TextStyle{ FontRole::RowSubtitle, theme.textSecondary });
 
+        if (!command.data.empty())
+        {
+            drawText(rt, gfx, command.data, r.detail, TextStyle{ FontRole::Hint, theme.textMuted });
+        }
+
         if (selected)
         {
             drawText(rt, gfx, actionHint(command.kind), r.hint,
@@ -353,7 +375,7 @@ void paintPalette(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, cons
 
     fill(rt, gfx, layout.footer, theme.footerBg);
     drawText(rt, gfx, getStatus(), layout.statusText, TextStyle{ FontRole::Hint, theme.textMuted });
-    drawText(rt, gfx, L"↑↓ move  ·  ↵ run  ·  Esc close", layout.footerHint,
+    drawText(rt, gfx, L"↑↓ move  ·  ↵ run  ·  Ctrl+K actions", layout.footerHint,
              TextStyle{ FontRole::Hint, theme.textMuted, DWRITE_TEXT_ALIGNMENT_TRAILING });
 }
 
@@ -494,7 +516,7 @@ D2D1_SIZE_F clientSizeDip()
 PaletteLayout buildPaletteLayout()
 {
     const D2D1_SIZE_F size = clientSizeDip();
-    return computePaletteLayout(size.width, size.height, static_cast<int>(g_app.results.size()));
+    return computePaletteLayout(size.width, size.height, static_cast<int>(g_app.results.size()), usesDetailRows());
 }
 
 SettingsLayout buildSettingsLayout()

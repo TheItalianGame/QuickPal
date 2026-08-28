@@ -275,6 +275,23 @@ bool runAsAdministrator(const Command& command)
     return true;
 }
 
+bool paletteUsesDetailRows()
+{
+    if (g_app.queryMode == QueryMode::Files)
+    {
+        return true;
+    }
+    for (const auto& result : g_app.results)
+    {
+        const CommandKind kind = result.command.kind;
+        if ((kind == CommandKind::File || kind == CommandKind::Folder) && !result.command.data.empty())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool drillIntoSelectedFolder()
 {
     if (g_app.results.empty())
@@ -887,7 +904,7 @@ void positionWindow()
     {
         const float heightDip = g_app.mode == UiMode::Settings
             ? metrics::settingsHeight
-            : paletteHeightForRows(static_cast<int>(g_app.results.size()));
+            : paletteHeightForRows(static_cast<int>(g_app.results.size()), paletteUsesDetailRows());
 
         const int width = dipToPx(metrics::windowWidth, dpi);
         const int maxHeight = (info.rcWork.bottom - info.rcWork.top) - dipToPx(64.0f, dpi);
@@ -1513,6 +1530,24 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_app.selected = pressedRow;
                 executeSelected();
             }
+        }
+        return 0;
+    }
+
+    case WM_RBUTTONUP:
+    {
+        if (g_app.mode != UiMode::Palette || g_app.actionMenu)
+        {
+            return 0;
+        }
+
+        const D2D1_POINT_2F point = clientPointDip(lParam);
+        const PaletteLayout layout = buildPaletteLayout();
+        const int row = hitTestPaletteRow(layout, point.x, point.y);
+        if (row >= 0)
+        {
+            g_app.selected = row;
+            showActionsForSelected();
         }
         return 0;
     }

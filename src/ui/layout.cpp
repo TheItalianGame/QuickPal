@@ -20,15 +20,16 @@ bool pointInRect(const D2D1_RECT_F& r, float x, float y)
     return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
-float paletteHeightForRows(int rowCount)
+float paletteHeightForRows(int rowCount, bool detailRows)
 {
+    const float pitch = detailRows ? metrics::detailRowPitch : metrics::rowPitch;
     const float body = rowCount > 0
-        ? static_cast<float>(rowCount) * metrics::rowPitch
+        ? static_cast<float>(rowCount) * pitch
         : metrics::emptyStateHeight;
     return metrics::listTop + body + metrics::listBottomPad + metrics::footerHeight;
 }
 
-PaletteLayout computePaletteLayout(float width, float height, int rowCount)
+PaletteLayout computePaletteLayout(float width, float height, int rowCount, bool detailRows)
 {
     PaletteLayout layout;
     layout.width = width;
@@ -49,15 +50,28 @@ PaletteLayout computePaletteLayout(float width, float height, int rowCount)
     layout.emptyText = rect(metrics::textMargin + 34.0f, metrics::listTop + 8.0f, width - metrics::textMargin, metrics::listTop + 48.0f);
 
     layout.rows.reserve(static_cast<size_t>(std::max(rowCount, 0)));
+    const float pitch = detailRows ? metrics::detailRowPitch : metrics::rowPitch;
+    const float rowHeight = detailRows ? metrics::detailRowHeight : metrics::rowHeight;
     for (int i = 0; i < rowCount; ++i)
     {
-        const float top = metrics::listTop + static_cast<float>(i) * metrics::rowPitch;
+        const float top = metrics::listTop + static_cast<float>(i) * pitch;
         PaletteRowRects r;
-        r.row = rect(metrics::sideMargin, top, width - metrics::sideMargin, top + metrics::rowHeight);
-        r.iconBox = rect(r.row.left + 12.0f, top + 8.0f, r.row.left + 42.0f, top + 38.0f);
-        r.title = rect(r.row.left + 54.0f, top + 4.0f, r.row.right - 100.0f, top + 24.0f);
-        r.subtitle = rect(r.row.left + 54.0f, top + 23.0f, r.row.right - 100.0f, top + 41.0f);
-        r.hint = rect(r.row.right - 96.0f, top + 13.0f, r.row.right - 12.0f, top + 33.0f);
+        r.row = rect(metrics::sideMargin, top, width - metrics::sideMargin, top + rowHeight);
+        if (detailRows)
+        {
+            r.iconBox = rect(r.row.left + 12.0f, top + 14.0f, r.row.left + 42.0f, top + 44.0f);
+            r.title = rect(r.row.left + 54.0f, top + 4.0f, r.row.right - 100.0f, top + 24.0f);
+            r.subtitle = rect(r.row.left + 54.0f, top + 25.0f, r.row.right - 100.0f, top + 42.0f);
+            r.detail = rect(r.row.left + 54.0f, top + 43.0f, r.row.right - 100.0f, top + 60.0f);
+            r.hint = rect(r.row.right - 96.0f, top + 22.0f, r.row.right - 12.0f, top + 42.0f);
+        }
+        else
+        {
+            r.iconBox = rect(r.row.left + 12.0f, top + 8.0f, r.row.left + 42.0f, top + 38.0f);
+            r.title = rect(r.row.left + 54.0f, top + 4.0f, r.row.right - 100.0f, top + 24.0f);
+            r.subtitle = rect(r.row.left + 54.0f, top + 23.0f, r.row.right - 100.0f, top + 41.0f);
+            r.hint = rect(r.row.right - 96.0f, top + 13.0f, r.row.right - 12.0f, top + 33.0f);
+        }
         layout.rows.push_back(r);
     }
 

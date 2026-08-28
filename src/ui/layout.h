@@ -17,6 +17,8 @@ constexpr float headerHeight = 74.0f;
 constexpr float listTop = 82.0f;
 constexpr float rowPitch = 50.0f;
 constexpr float rowHeight = 46.0f;
+constexpr float detailRowPitch = 68.0f;
+constexpr float detailRowHeight = 64.0f;
 constexpr float footerHeight = 34.0f;
 constexpr float listBottomPad = 8.0f;
 constexpr float emptyStateHeight = 60.0f;
@@ -42,6 +44,7 @@ struct PaletteRowRects
     D2D1_RECT_F iconBox{};
     D2D1_RECT_F title{};
     D2D1_RECT_F subtitle{};
+    D2D1_RECT_F detail{};
     D2D1_RECT_F hint{};
 };
 
@@ -99,9 +102,9 @@ struct SettingsLayout
     std::vector<SettingsRowRects> rows;
 };
 
-float paletteHeightForRows(int rowCount);
+float paletteHeightForRows(int rowCount, bool detailRows = false);
 
-PaletteLayout computePaletteLayout(float width, float height, int rowCount);
+PaletteLayout computePaletteLayout(float width, float height, int rowCount, bool detailRows = false);
 SettingsLayout computeSettingsLayout(float width, float height, const std::vector<SettingRow>& rows, float scrollY);
 
 // Scroll offset needed to bring a row fully inside the settings list viewport.
