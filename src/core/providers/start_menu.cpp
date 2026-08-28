@@ -74,6 +74,8 @@ public:
         out.push_back(makeSettingHeader(L"Start Menu apps"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open Start Menu app search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for Start Menu app search", info().id));
         out.push_back(makeSettingItem(SettingField::IndexStartMenu, SettingKind::Toggle,
                                       L"Index apps", L"Scan Start Menu shortcuts and Store apps"));
     }

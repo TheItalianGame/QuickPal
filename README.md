@@ -38,7 +38,7 @@ bin\QuickPalChromeHost.exe
 - Right-click the tray icon for Settings, Reload indexes, shell runner toggle, Everything HTTP/SDK toggles, and Exit.
 - Type normally to search indexed apps, PATH tools, settings, and built-ins.
 - `file <name>` or `f <name>` searches files through Everything HTTP, Everything SDK, or the fallback index. File rows show full path, size, and modified date.
-- `Alt+E` opens the file search provider directly. Provider shortcuts can be changed in Settings.
+- `Alt+E` opens the file search provider directly. Provider shortcuts and primary typed prefixes can be changed in Settings.
 - `?? <query>` opens a web search.
 - `> <command>` runs a shell command. PowerShell is the default runner; switch to cmd in Settings or the tray menu.
 - `= <expression>`, `calc <expression>`, or raw math like `23*47` calculates in-process and copies the result on Enter.
@@ -72,6 +72,10 @@ Chrome tab search uses the unpacked extension in `chrome-extension` and the nati
 4. Click Load unpacked and choose the `chrome-extension` folder.
 
 The extension keeps `%APPDATA%\QuickPal\chrome_tabs.json` updated. QuickPal reads that local cache for fast search and sends focus requests back through a named pipe.
+
+## Provider Settings
+
+Every provider has Shortcut and Prefix rows in Settings. Shortcut captures a global hotkey; Prefix edits the primary typed alias. Click a Prefix row, type the alias, press Enter to save, Delete to reset, or Esc to cancel. Built-in aliases remain available, and QuickPal prevents duplicate provider prefixes.
 
 ## PowerToys Reference
 

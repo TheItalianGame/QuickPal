@@ -37,6 +37,7 @@ enum class SettingField
     MaxResults,
     ShowLatency,
     ProviderShortcut,
+    ProviderPrefix,
     ProviderAction,
     InstallChromeExtension,
     ReloadIndexes,
@@ -104,6 +105,9 @@ std::wstring settingValueText(const SettingItem& item, const Settings& settings)
 
 std::wstring providerShortcutValue(const std::wstring& providerId);
 void setProviderShortcutValue(const std::wstring& providerId, const std::wstring& shortcut);
+std::wstring providerPrefixValue(const std::wstring& providerId);
+void setProviderPrefixValue(const std::wstring& providerId, const std::wstring& prefix);
+std::wstring providerPrefixConflict(const std::wstring& providerId, const std::wstring& prefix);
 
 bool settingNeedsRebuild(SettingField field);
 bool settingNeedsRepaintOnly(SettingField field);

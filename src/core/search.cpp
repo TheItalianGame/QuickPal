@@ -27,7 +27,7 @@ Query withoutPrefix(const Query& query)
     return bare;
 }
 
-void addFallbackActions(const Query& query, ResultSink& sink)
+void addFallbackActions(const Query& query, const wchar_t* matchedProviderId, ResultSink& sink)
 {
     const std::wstring subject = trimCopy(query.subject());
     if (subject.empty())
@@ -35,14 +35,14 @@ void addFallbackActions(const Query& query, ResultSink& sink)
         return;
     }
 
-    if (query.prefix != L"f" && query.prefix != L"file")
+    if (!matchedProviderId || wcscmp(matchedProviderId, L"files") != 0)
     {
         Command file = makeCommand(CommandKind::PaletteQuery, L"Search files for \"" + subject + L"\"",
                                    L"Run a file search", L"f " + subject, 0);
         sink.add(std::move(file), 9000);
     }
 
-    if (query.prefix != L"??")
+    if (!matchedProviderId || wcscmp(matchedProviderId, L"web") != 0)
     {
         Command web = makeCommand(CommandKind::Web, L"Search the web for \"" + subject + L"\"",
                                   L"Google Search", subject, 0);
@@ -50,12 +50,24 @@ void addFallbackActions(const Query& query, ResultSink& sink)
         sink.add(std::move(web), 8900);
     }
 
-    if (query.prefix != L">")
+    if (!matchedProviderId || wcscmp(matchedProviderId, L"shell") != 0)
     {
         Command shell = makeCommand(CommandKind::Shell, L"Run \"" + subject + L"\" in shell",
                                     L"PowerShell or cmd, based on Settings", subject, 0);
         shell.provider = L"shell";
         sink.add(std::move(shell), 8800);
+    }
+}
+
+void scanStaticIndexForProvider(const ProviderInfo& info, const std::vector<std::wstring>& terms, ResultSink& sink)
+{
+    std::shared_lock<std::shared_mutex> lock(indexMutex());
+    for (const auto& command : staticIndexUnlocked())
+    {
+        if (command.provider && wcscmp(command.provider, info.id) == 0)
+        {
+            sink.addScored(command, terms);
+        }
     }
 }
 
@@ -90,16 +102,18 @@ SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, H
     ProviderRegistry& registry = ProviderRegistry::instance();
 
     Provider* matched = nullptr;
-    const Query query = parseQuery(rawQuery, &matched);
+    const Query query = parseQuery(rawQuery, settings, &matched);
 
     ResultSink sink(settings.maxResults);
 
-    if (matched && matched->info().exclusive)
+    if (matched && query.hasPrefix())
     {
         // A focused mode owns the whole result list.
-        out.mode = matched->info().mode;
+        const ProviderInfo info = matched->info();
+        out.mode = info.mode;
         out.highlightTerms = query.bodyTerms;
         runProvider(matched, ctx, query, sink);
+        scanStaticIndexForProvider(info, query.bodyTerms, sink);
     }
     else
     {
@@ -146,7 +160,7 @@ SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, H
         {
             out.mode = QueryMode::Actions;
         }
-        addFallbackActions(query, sink);
+        addFallbackActions(query, matched ? matched->info().id : nullptr, sink);
     }
 
     out.results = sink.take();
@@ -194,16 +208,7 @@ SearchOutput runProviderSearch(const std::wstring& rawQuery, const wchar_t* prov
     out.highlightTerms = query.terms;
     runProvider(provider, ctx, query, sink);
 
-    {
-        std::shared_lock<std::shared_mutex> lock(indexMutex());
-        for (const auto& command : staticIndexUnlocked())
-        {
-            if (command.provider && wcscmp(command.provider, info.id) == 0)
-            {
-                sink.addScored(command, query.terms);
-            }
-        }
-    }
+    scanStaticIndexForProvider(info, query.terms, sink);
 
     out.results = sink.take();
 

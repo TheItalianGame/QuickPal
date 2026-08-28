@@ -67,6 +67,8 @@ public:
         out.push_back(makeSettingHeader(L"Clipboard"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open clipboard history directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for clipboard history", info().id));
     }
 };
 }

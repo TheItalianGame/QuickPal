@@ -174,7 +174,8 @@ SettingsLayout computeSettingsLayout(float width, float height, const std::vecto
             }
             case SettingKind::Action:
             {
-                const float width = row.item.field == SettingField::ProviderShortcut ? 132.0f : 92.0f;
+                const float width = (row.item.field == SettingField::ProviderShortcut ||
+                                     row.item.field == SettingField::ProviderPrefix) ? 132.0f : 92.0f;
                 r.action = rect(r.control.right - width, cy - 15.0f, r.control.right, cy + 15.0f);
                 break;
             }

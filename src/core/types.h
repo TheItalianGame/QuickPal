@@ -157,6 +157,7 @@ struct Settings
     std::unordered_map<std::wstring, std::wstring> providerShortcuts = {
         { L"files", L"Alt+E" },
     };
+    std::unordered_map<std::wstring, std::wstring> providerPrefixes;
 };
 
 enum class UiMode

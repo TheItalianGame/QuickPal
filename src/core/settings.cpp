@@ -114,6 +114,18 @@ Settings normalizedSettings(Settings settings)
     {
         settings.appearance = Appearance::System;
     }
+    for (auto it = settings.providerPrefixes.begin(); it != settings.providerPrefixes.end();)
+    {
+        it->second = normalizeProviderPrefix(it->second);
+        if (it->second.empty())
+        {
+            it = settings.providerPrefixes.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
     return settings;
 }
 
@@ -168,6 +180,12 @@ void saveSettings()
     {
         WritePrivateProfileStringW(L"ProviderShortcuts", providerId.c_str(), shortcut.c_str(), path.c_str());
     }
+
+    WritePrivateProfileStringW(L"ProviderPrefixes", nullptr, nullptr, path.c_str());
+    for (const auto& [providerId, prefix] : settings.providerPrefixes)
+    {
+        WritePrivateProfileStringW(L"ProviderPrefixes", providerId.c_str(), prefix.c_str(), path.c_str());
+    }
 }
 
 void loadSettings()
@@ -212,6 +230,10 @@ void loadSettings()
     for (const auto& key : readIniKeys(path, L"ProviderShortcuts"))
     {
         settings.providerShortcuts[key] = readIniString(path, L"ProviderShortcuts", key.c_str(), L"");
+    }
+    for (const auto& key : readIniKeys(path, L"ProviderPrefixes"))
+    {
+        settings.providerPrefixes[key] = normalizeProviderPrefix(readIniString(path, L"ProviderPrefixes", key.c_str(), L""));
     }
 
     {
@@ -482,6 +504,80 @@ std::wstring providerShortcutValue(const std::wstring& providerId)
     return it->second;
 }
 
+static std::wstring providerPrefixValue(const std::wstring& providerId, const Settings& settings)
+{
+    if (Provider* provider = ProviderRegistry::instance().byId(providerId.c_str()))
+    {
+        const ProviderInfo info = provider->info();
+        const auto custom = settings.providerPrefixes.find(providerId);
+        if (custom != settings.providerPrefixes.end() && !normalizeProviderPrefix(custom->second).empty())
+        {
+            return normalizeProviderPrefix(custom->second);
+        }
+
+        const std::vector<std::wstring> prefixes = effectiveProviderPrefixes(info, settings);
+        if (!prefixes.empty())
+        {
+            return prefixes.front();
+        }
+    }
+    return L"None";
+}
+
+std::wstring providerPrefixValue(const std::wstring& providerId)
+{
+    return providerPrefixValue(providerId, getSettingsSnapshot());
+}
+
+void setProviderPrefixValue(const std::wstring& providerId, const std::wstring& prefix)
+{
+    if (providerId.empty())
+    {
+        return;
+    }
+
+    const std::wstring normalized = normalizeProviderPrefix(prefix);
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        if (normalized.empty())
+        {
+            g_settings.providerPrefixes.erase(providerId);
+        }
+        else
+        {
+            g_settings.providerPrefixes[providerId] = normalized;
+        }
+    }
+    saveSettings();
+}
+
+std::wstring providerPrefixConflict(const std::wstring& providerId, const std::wstring& prefix)
+{
+    const std::wstring normalized = normalizeProviderPrefix(prefix);
+    if (normalized.empty())
+    {
+        return {};
+    }
+
+    const Settings settings = getSettingsSnapshot();
+    for (const auto& provider : ProviderRegistry::instance().all())
+    {
+        const ProviderInfo info = provider->info();
+        if (providerId == info.id)
+        {
+            continue;
+        }
+        for (const auto& candidate : effectiveProviderPrefixes(info, settings))
+        {
+            if (lowerCopy(candidate) == lowerCopy(normalized))
+            {
+                return info.title;
+            }
+        }
+    }
+    return {};
+}
+
 void setProviderShortcutValue(const std::wstring& providerId, const std::wstring& shortcut)
 {
     if (providerId.empty())
@@ -512,6 +608,10 @@ std::wstring settingValueText(const SettingItem& item, const Settings& settings)
             return L"None";
         }
         return it->second;
+    }
+    if (item.field == SettingField::ProviderPrefix)
+    {
+        return providerPrefixValue(item.providerId, settings);
     }
     return settingValueText(item.field, settings);
 }
@@ -635,6 +735,7 @@ static void mutateLocked(SettingField field, int direction)
         break;
     case SettingField::ReloadIndexes:
     case SettingField::ProviderShortcut:
+    case SettingField::ProviderPrefix:
     case SettingField::ProviderAction:
     case SettingField::InstallChromeExtension:
         break;

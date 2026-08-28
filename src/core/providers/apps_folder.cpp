@@ -119,6 +119,8 @@ public:
         out.push_back(makeSettingHeader(L"Store apps"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open Store app search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for Store app search", info().id));
     }
 };
 }

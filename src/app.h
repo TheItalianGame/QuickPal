@@ -56,6 +56,9 @@ struct AppState
     std::wstring numberBuffer;
     bool capturingShortcut = false;
     std::wstring capturingShortcutProvider;
+    bool editingPrefix = false;
+    std::wstring prefixProvider;
+    std::wstring prefixBuffer;
 
     int pressedRow = -1;
     PressedPart pressedPart = PressedPart::None;

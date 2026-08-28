@@ -156,6 +156,8 @@ public:
         out.push_back(makeSettingHeader(L"Quicklinks"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open quicklink aliases directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for quicklink-only search", info().id));
     }
 
 private:

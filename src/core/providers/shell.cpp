@@ -59,6 +59,8 @@ public:
         out.push_back(makeSettingHeader(L"Shell"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open shell command runner directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for shell commands", info().id));
         out.push_back(makeSettingItem(SettingField::ShellUsesPowerShell, SettingKind::Toggle,
                                       L"PowerShell", L"Run shell commands through PowerShell when enabled"));
     }

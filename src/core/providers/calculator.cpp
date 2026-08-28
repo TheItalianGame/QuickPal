@@ -62,6 +62,8 @@ public:
         out.push_back(makeSettingHeader(L"Calculator"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open calculator directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for calculator mode", info().id));
     }
 };
 }

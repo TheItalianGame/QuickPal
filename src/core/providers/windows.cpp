@@ -146,6 +146,8 @@ public:
         out.push_back(makeSettingHeader(L"Open windows"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open window switcher directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for window-only search", info().id));
     }
 };
 }

@@ -354,6 +354,8 @@ public:
         out.push_back(makeSettingHeader(L"Files / Everything"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open file search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for file search", info().id));
         out.push_back(makeSettingItem(SettingField::UseEverythingHttp, SettingKind::Toggle,
                                       L"Everything HTTP API", L"Use Everything's local HTTP server first"));
         out.push_back(makeSettingItem(SettingField::EverythingHttpPort, SettingKind::Stepper,

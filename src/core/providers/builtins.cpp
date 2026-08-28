@@ -57,6 +57,8 @@ public:
         out.push_back(makeSettingHeader(L"Commands"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open built-in commands directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for built-in commands", info().id));
     }
 };
 }

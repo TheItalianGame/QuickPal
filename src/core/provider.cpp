@@ -5,12 +5,27 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <unordered_set>
 
 namespace
 {
 bool isSymbolPrefix(const std::wstring& prefix)
 {
     return !prefix.empty() && std::iswalnum(prefix.front()) == 0;
+}
+
+void appendPrefix(std::vector<std::wstring>& prefixes, std::unordered_set<std::wstring>& seen, std::wstring prefix)
+{
+    prefix = normalizeProviderPrefix(std::move(prefix));
+    if (prefix.empty())
+    {
+        return;
+    }
+    const std::wstring key = lowerCopy(prefix);
+    if (seen.insert(key).second)
+    {
+        prefixes.push_back(std::move(prefix));
+    }
 }
 }
 
@@ -78,14 +93,15 @@ Provider* ProviderRegistry::byId(const wchar_t* id) const
     return nullptr;
 }
 
-Provider* ProviderRegistry::matchPrefix(const std::wstring& raw, const std::wstring& lower, std::wstring& outPrefix) const
+Provider* ProviderRegistry::matchPrefix(const std::wstring& raw, const std::wstring& lower,
+                                        const Settings& settings, std::wstring& outPrefix) const
 {
     Provider* best = nullptr;
     size_t bestLength = 0;
 
     for (const auto& provider : providers_)
     {
-        for (const auto& prefix : provider->info().prefixes)
+        for (const auto& prefix : effectiveProviderPrefixes(provider->info(), settings))
         {
             if (prefix.empty())
             {
@@ -120,7 +136,7 @@ Provider* ProviderRegistry::matchPrefix(const std::wstring& raw, const std::wstr
     return best;
 }
 
-Query parseQuery(const std::wstring& rawInput, Provider** outMatched)
+Query parseQuery(const std::wstring& rawInput, const Settings& settings, Provider** outMatched)
 {
     Query query;
     query.raw = trimCopy(rawInput);
@@ -128,7 +144,7 @@ Query parseQuery(const std::wstring& rawInput, Provider** outMatched)
     query.terms = splitTerms(query.lower);
 
     std::wstring prefix;
-    Provider* matched = ProviderRegistry::instance().matchPrefix(query.raw, query.lower, prefix);
+    Provider* matched = ProviderRegistry::instance().matchPrefix(query.raw, query.lower, settings, prefix);
     if (matched && !prefix.empty())
     {
         // Word prefixes consume the separating space; symbol prefixes do not.
@@ -144,6 +160,53 @@ Query parseQuery(const std::wstring& rawInput, Provider** outMatched)
         *outMatched = matched;
     }
     return query;
+}
+
+std::wstring normalizeProviderPrefix(std::wstring prefix)
+{
+    prefix = trimCopy(prefix);
+    if (prefix.empty() || lowerCopy(prefix) == L"none")
+    {
+        return {};
+    }
+
+    std::wstring out;
+    out.reserve(std::min<size_t>(prefix.size(), 16));
+    for (wchar_t ch : prefix)
+    {
+        if (std::iswspace(ch) || std::iswcntrl(ch))
+        {
+            continue;
+        }
+        out.push_back(ch);
+        if (out.size() >= 16)
+        {
+            break;
+        }
+    }
+
+    if (!out.empty() && std::iswalnum(out.front()))
+    {
+        out = lowerCopy(out);
+    }
+    return out;
+}
+
+std::vector<std::wstring> effectiveProviderPrefixes(const ProviderInfo& info, const Settings& settings)
+{
+    std::vector<std::wstring> prefixes;
+    std::unordered_set<std::wstring> seen;
+    seen.reserve(info.prefixes.size() + 1);
+
+    if (const auto it = settings.providerPrefixes.find(info.id); it != settings.providerPrefixes.end())
+    {
+        appendPrefix(prefixes, seen, it->second);
+    }
+    for (const auto& prefix : info.prefixes)
+    {
+        appendPrefix(prefixes, seen, prefix);
+    }
+    return prefixes;
 }
 
 const wchar_t* queryModeLabel(QueryMode mode)

@@ -55,6 +55,8 @@ public:
         out.push_back(makeSettingHeader(L"Windows settings"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open Windows settings search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for Windows settings search", info().id));
     }
 };
 }

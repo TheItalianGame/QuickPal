@@ -110,6 +110,8 @@ public:
         out.push_back(makeSettingHeader(L"Browser tabs"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open Chrome tab search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for Chrome tab search", info().id));
         out.push_back(makeSettingItem(SettingField::UseChromeTabs, SettingKind::Toggle,
                                       L"Chrome tabs", L"Read open tabs from the local Chrome extension"));
         out.push_back(makeSettingItem(SettingField::InstallChromeExtension, SettingKind::Action,

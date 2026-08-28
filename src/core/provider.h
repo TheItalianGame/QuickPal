@@ -151,14 +151,18 @@ public:
     const std::vector<std::unique_ptr<Provider>>& all() const { return providers_; }
 
     // Longest matching prefix wins, so "file " beats "f " on "file report".
-    Provider* matchPrefix(const std::wstring& raw, const std::wstring& lower, std::wstring& outPrefix) const;
+    Provider* matchPrefix(const std::wstring& raw, const std::wstring& lower,
+                          const Settings& settings, std::wstring& outPrefix) const;
     Provider* byId(const wchar_t* id) const;
 
 private:
     std::vector<std::unique_ptr<Provider>> providers_;
 };
 
-// Builds a Query, resolving which provider's prefix (if any) claimed it.
-Query parseQuery(const std::wstring& rawInput, Provider** outMatched);
+// Builds a Query, resolving which provider's effective prefix (if any) claimed it.
+Query parseQuery(const std::wstring& rawInput, const Settings& settings, Provider** outMatched);
+
+std::wstring normalizeProviderPrefix(std::wstring prefix);
+std::vector<std::wstring> effectiveProviderPrefixes(const ProviderInfo& info, const Settings& settings);
 
 const wchar_t* queryModeLabel(QueryMode mode);

@@ -47,6 +47,8 @@ public:
         out.push_back(makeSettingHeader(L"Web search"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open web search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for web search", info().id));
     }
 };
 }

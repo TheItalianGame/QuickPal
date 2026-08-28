@@ -487,6 +487,11 @@ void paintSettings(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, con
             {
                 value = L"Press keys";
             }
+            if (g_app.editingPrefix && row.item.field == SettingField::ProviderPrefix &&
+                row.item.providerId == g_app.prefixProvider)
+            {
+                value = g_app.prefixBuffer.empty() ? L"_" : g_app.prefixBuffer;
+            }
             drawText(rt, gfx, value, r.action,
                      TextStyle{ FontRole::Value, theme.accent, DWRITE_TEXT_ALIGNMENT_CENTER });
             break;
@@ -504,8 +509,16 @@ void paintSettings(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, con
 
     fill(rt, gfx, layout.footer, theme.footerBg);
     drawText(rt, gfx, getStatus(), layout.statusText, TextStyle{ FontRole::Hint, theme.textMuted });
-    drawText(rt, gfx, L"↑↓ move  ·  ←→ adjust  ·  ↵ apply  ·  Esc close",
-             layout.footerHint, TextStyle{ FontRole::Hint, theme.textMuted, DWRITE_TEXT_ALIGNMENT_TRAILING });
+    std::wstring hint = L"↑↓ move  ·  ←→ adjust  ·  ↵ apply  ·  Esc close";
+    if (g_app.editingPrefix)
+    {
+        hint = L"Type prefix  ·  ↵ save  ·  Del reset  ·  Esc cancel";
+    }
+    else if (g_app.capturingShortcut)
+    {
+        hint = L"Press shortcut  ·  Backspace clear  ·  Esc cancel";
+    }
+    drawText(rt, gfx, hint, layout.footerHint, TextStyle{ FontRole::Hint, theme.textMuted, DWRITE_TEXT_ALIGNMENT_TRAILING });
 }
 }
 

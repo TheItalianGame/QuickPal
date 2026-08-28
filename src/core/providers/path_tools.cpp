@@ -75,6 +75,8 @@ public:
         out.push_back(makeSettingHeader(L"PATH tools"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open PATH tool search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
+                                      L"Prefix", L"Typed alias for PATH tool search", info().id));
         out.push_back(makeSettingItem(SettingField::IndexPathTools, SettingKind::Toggle,
                                       L"Index PATH", L"Add executables, cmd files, and bat files from PATH"));
     }

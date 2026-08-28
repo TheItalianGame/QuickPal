@@ -66,6 +66,13 @@ void cancelShortcutCapture()
     g_app.capturingShortcutProvider.clear();
 }
 
+void cancelPrefixEdit()
+{
+    g_app.editingPrefix = false;
+    g_app.prefixProvider.clear();
+    g_app.prefixBuffer.clear();
+}
+
 std::wstring providerIdForHotkey(WPARAM id)
 {
     if (id < kProviderHotkeyBase)
@@ -664,6 +671,7 @@ void cancelNumberEdit()
 void beginShortcutCapture(const std::wstring& providerId)
 {
     cancelNumberEdit();
+    cancelPrefixEdit();
     g_app.capturingShortcut = true;
     g_app.capturingShortcutProvider = providerId;
     setTransientStatus(L"Press a shortcut. Backspace clears, Esc cancels.");
@@ -715,6 +723,113 @@ void finishShortcutCapture(WPARAM key)
     invalidate();
 }
 
+bool commitPrefixEdit()
+{
+    if (!g_app.editingPrefix)
+    {
+        return true;
+    }
+
+    const std::wstring prefix = normalizeProviderPrefix(g_app.prefixBuffer);
+    const std::wstring conflict = providerPrefixConflict(g_app.prefixProvider, prefix);
+    if (!conflict.empty())
+    {
+        setTransientStatus(L"Prefix already used by " + conflict + L".");
+        invalidate();
+        return false;
+    }
+
+    setProviderPrefixValue(g_app.prefixProvider, prefix);
+    cancelPrefixEdit();
+    setTransientStatus(prefix.empty() ? L"Provider prefix reset." : L"Provider prefix set to " + prefix + L".");
+    invalidate();
+    return true;
+}
+
+void beginPrefixEdit(const std::wstring& providerId)
+{
+    cancelNumberEdit();
+    cancelShortcutCapture();
+    g_app.editingPrefix = true;
+    g_app.prefixProvider = providerId;
+
+    const std::wstring current = providerPrefixValue(providerId);
+    g_app.prefixBuffer = current == L"None" ? std::wstring{} : current;
+    setTransientStatus(L"Type a prefix. Enter saves, Delete resets, Esc cancels.");
+    invalidate();
+}
+
+void appendPrefixChar(wchar_t ch)
+{
+    if (!g_app.editingPrefix)
+    {
+        return;
+    }
+    if (std::iswspace(ch) || std::iswcntrl(ch))
+    {
+        setTransientStatus(L"Prefixes cannot contain spaces.");
+        invalidate();
+        return;
+    }
+    if (g_app.prefixBuffer.size() >= 16)
+    {
+        setTransientStatus(L"Prefixes are limited to 16 characters.");
+        invalidate();
+        return;
+    }
+
+    g_app.prefixBuffer.push_back(ch);
+    g_app.prefixBuffer = normalizeProviderPrefix(g_app.prefixBuffer);
+    invalidate();
+}
+
+void handlePrefixEditKey(WPARAM key)
+{
+    switch (key)
+    {
+    case VK_ESCAPE:
+        cancelPrefixEdit();
+        clearTransientStatus();
+        invalidate();
+        return;
+    case VK_RETURN:
+        commitPrefixEdit();
+        return;
+    case VK_UP:
+        if (commitPrefixEdit())
+        {
+            g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, -1);
+            scrollSettingsSelectionIntoView();
+            invalidate();
+        }
+        return;
+    case VK_DOWN:
+    case VK_TAB:
+        if (commitPrefixEdit())
+        {
+            g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, 1);
+            scrollSettingsSelectionIntoView();
+            invalidate();
+        }
+        return;
+    case VK_BACK:
+        if (!g_app.prefixBuffer.empty())
+        {
+            g_app.prefixBuffer.pop_back();
+            invalidate();
+        }
+        return;
+    case VK_DELETE:
+        setProviderPrefixValue(g_app.prefixProvider, L"");
+        cancelPrefixEdit();
+        setTransientStatus(L"Provider prefix reset.");
+        invalidate();
+        return;
+    default:
+        return;
+    }
+}
+
 void applySettingAt(int rowIndex, int direction)
 {
     const auto& rows = settingRows();
@@ -729,6 +844,11 @@ void applySettingAt(int rowIndex, int direction)
     if (field == SettingField::ProviderShortcut)
     {
         beginShortcutCapture(item.providerId);
+        return;
+    }
+    if (field == SettingField::ProviderPrefix)
+    {
+        beginPrefixEdit(item.providerId);
         return;
     }
     if (field == SettingField::InstallChromeExtension)
@@ -900,6 +1020,11 @@ void handlePaletteKey(WPARAM key)
 
 void handleSettingsKey(WPARAM key)
 {
+    if (g_app.editingPrefix)
+    {
+        handlePrefixEditKey(key);
+        return;
+    }
     if (g_app.capturingShortcut)
     {
         finishShortcutCapture(key);
@@ -922,6 +1047,10 @@ void handleSettingsKey(WPARAM key)
         return;
     case VK_UP:
         commitNumberEdit();
+        if (!commitPrefixEdit())
+        {
+            return;
+        }
         g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, -1);
         scrollSettingsSelectionIntoView();
         invalidate();
@@ -929,6 +1058,10 @@ void handleSettingsKey(WPARAM key)
     case VK_DOWN:
     case VK_TAB:
         commitNumberEdit();
+        if (!commitPrefixEdit())
+        {
+            return;
+        }
         g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, 1);
         scrollSettingsSelectionIntoView();
         invalidate();
@@ -1049,12 +1182,16 @@ void positionWindow()
             ? metrics::settingsHeight
             : paletteHeightForRows(static_cast<int>(g_app.results.size()), paletteUsesDetailRows());
 
-        const int width = dipToPx(metrics::windowWidth, dpi);
+        const int workWidth = std::max<int>(1, info.rcWork.right - info.rcWork.left);
+        const int preferredWidth = dipToPx(metrics::windowWidth, dpi);
+        const int horizontalMargin = std::min(workWidth - 1, std::max(0, dipToPx(24.0f, dpi)));
+        const int availableWidth = std::max(1, workWidth - horizontalMargin);
+        const int width = std::min(preferredWidth, availableWidth);
         const int maxHeight = (info.rcWork.bottom - info.rcWork.top) - dipToPx(64.0f, dpi);
         const int minHeight = dipToPx(180.0f, dpi);
         const int height = std::clamp(dipToPx(heightDip, dpi), minHeight, std::max(minHeight, maxHeight));
 
-        const int x = info.rcWork.left + ((info.rcWork.right - info.rcWork.left) - width) / 2;
+        const int x = info.rcWork.left + std::max(0, (workWidth - width) / 2);
         const int y = info.rcWork.top + dipToPx(96.0f, dpi);
         SetWindowPos(g_app.hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 
@@ -1096,6 +1233,7 @@ void showPalette()
     g_app.pressedPaletteRow = -1;
     cancelNumberEdit();
     cancelShortcutCapture();
+    cancelPrefixEdit();
 
     refreshTheme();
     applyWindowChrome(g_app.hwnd, g_app.theme);
@@ -1123,6 +1261,7 @@ void showProviderPalette(const std::wstring& providerId)
     g_app.pressedPaletteRow = -1;
     cancelNumberEdit();
     cancelShortcutCapture();
+    cancelPrefixEdit();
 
     refreshTheme();
     applyWindowChrome(g_app.hwnd, g_app.theme);
@@ -1145,6 +1284,7 @@ void showSettings()
     g_app.pressedRow = -1;
     g_app.pressedPart = PressedPart::None;
     cancelNumberEdit();
+    cancelPrefixEdit();
 
     const auto& rows = settingRows();
     if (g_app.settingsSelected < 0 || g_app.settingsSelected >= static_cast<int>(rows.size()) ||
@@ -1174,6 +1314,7 @@ void hidePalette()
     g_app.actionReturnText.clear();
     g_app.forcedProviderId.clear();
     cancelShortcutCapture();
+    cancelPrefixEdit();
     if (g_app.hwnd)
     {
         KillTimer(g_app.hwnd, kCaretTimerId);
@@ -1379,7 +1520,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_SYSKEYDOWN:
-        if (g_app.mode == UiMode::Settings && g_app.capturingShortcut)
+        if (g_app.mode == UiMode::Settings && (g_app.capturingShortcut || g_app.editingPrefix))
         {
             handleSettingsKey(wParam);
             return 0;
@@ -1387,14 +1528,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_SYSCHAR:
-        if (g_app.mode == UiMode::Settings && g_app.capturingShortcut)
+        if (g_app.mode == UiMode::Settings && (g_app.capturingShortcut || g_app.editingPrefix))
         {
             return 0;
         }
         break;
 
     case WM_KEYDOWN:
-        if (g_app.mode == UiMode::Settings && g_app.capturingShortcut)
+        if (g_app.mode == UiMode::Settings && (g_app.capturingShortcut || g_app.editingPrefix))
         {
             handleSettingsKey(wParam);
             return 0;
@@ -1489,6 +1630,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (g_app.mode == UiMode::Settings)
         {
+            if (g_app.editingPrefix)
+            {
+                appendPrefixChar(ch);
+                return 0;
+            }
             // Typing a number on a stepper row beats pressing + thirty times.
             if (g_app.capturingShortcut)
             {
@@ -1624,6 +1770,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (g_app.settingsSelected != hit.row)
                 {
                     commitNumberEdit();
+                    if (!commitPrefixEdit())
+                    {
+                        return 0;
+                    }
                 }
                 g_app.settingsSelected = hit.row;
                 g_app.pressedRow = hit.row;
