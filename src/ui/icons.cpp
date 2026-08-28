@@ -215,6 +215,7 @@ void drawKindGlyph(ID2D1RenderTarget* rt, Graphics& gfx, GlyphCache& cache, Comm
         break;
 
     case CommandKind::Web:
+    case CommandKind::ChromeTab:
         rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(12.0f, 12.0f), 9.0f, 9.0f), brush, s);
         rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(12.0f, 12.0f), 4.2f, 9.0f), brush, s);
         rt->DrawLine(D2D1::Point2F(3.2f, 12.0f), D2D1::Point2F(20.8f, 12.0f), brush, s);

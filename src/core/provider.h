@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+struct SettingRow;
+
 // ---------------------------------------------------------------------------
 // Provider API
 //
@@ -134,6 +136,10 @@ public:
     // Activate one of this provider's commands. Return true if handled; return
     // false to fall through to the shared open-with-shell behavior.
     virtual bool execute(const ProviderContext&, const Command&) { return false; }
+
+    // Optional provider-owned settings rows. Providers that expose toggles,
+    // install actions, or a preferred shortcut append their section here.
+    virtual void settings(const ProviderContext&, std::vector<SettingRow>&) {}
 };
 
 class ProviderRegistry

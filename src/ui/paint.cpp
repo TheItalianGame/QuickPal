@@ -124,6 +124,7 @@ const wchar_t* actionHint(CommandKind kind)
     case CommandKind::QuickLink: return L"Open";
     case CommandKind::Clipboard: return L"Copy";
     case CommandKind::Process: return L"Kill";
+    case CommandKind::ChromeTab: return L"Focus";
     case CommandKind::Action: return L"Do";
     default: return L"Open";
     }
@@ -355,7 +356,7 @@ void paintPalette(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, cons
         const std::wstring& subtitle = command.subtitle.empty() ? command.arg : command.subtitle;
         drawText(rt, gfx, subtitle, r.subtitle, TextStyle{ FontRole::RowSubtitle, theme.textSecondary });
 
-        if (!command.data.empty())
+        if (!command.data.empty() && r.detail.bottom > r.detail.top)
         {
             drawText(rt, gfx, command.data, r.detail, TextStyle{ FontRole::Hint, theme.textMuted });
         }
@@ -480,7 +481,13 @@ void paintSettings(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, con
             const bool pressed = pressedHere && g_app.pressedPart == PressedPart::Action;
             const D2D1_COLOR_F background = pressed ? theme.controlPressed : (hovered ? theme.controlHover : theme.controlBg);
             fillRounded(rt, gfx, r.action, 8.0f, background);
-            drawText(rt, gfx, settingValueText(row.item.field, settings), r.action,
+            std::wstring value = settingValueText(row.item, settings);
+            if (g_app.capturingShortcut && row.item.field == SettingField::ProviderShortcut &&
+                row.item.providerId == g_app.capturingShortcutProvider)
+            {
+                value = L"Press keys";
+            }
+            drawText(rt, gfx, value, r.action,
                      TextStyle{ FontRole::Value, theme.accent, DWRITE_TEXT_ALIGNMENT_CENTER });
             break;
         }

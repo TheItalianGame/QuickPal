@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 #include <shlobj.h>
@@ -112,6 +113,13 @@ public:
             CoUninitialize();
         }
     }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Store apps"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open Store app search directly", info().id));
+    }
 };
 }
 
@@ -119,4 +127,3 @@ std::unique_ptr<Provider> makeAppsFolderProvider()
 {
     return std::make_unique<AppsFolderProvider>();
 }
-

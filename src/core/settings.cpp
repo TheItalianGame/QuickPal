@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include "provider.h"
 #include "util.h"
 
 #include <algorithm>
@@ -44,6 +45,28 @@ static std::wstring readIniString(const std::wstring& path, const wchar_t* secti
                                                static_cast<DWORD>(value.size()), path.c_str());
     value.resize(len);
     return value;
+}
+
+static std::vector<std::wstring> readIniKeys(const std::wstring& path, const wchar_t* section)
+{
+    std::wstring keys(32768, L'\0');
+    const DWORD len = GetPrivateProfileStringW(section, nullptr, L"", keys.data(),
+                                               static_cast<DWORD>(keys.size()), path.c_str());
+    keys.resize(len);
+
+    std::vector<std::wstring> out;
+    for (size_t i = 0; i < keys.size();)
+    {
+        const wchar_t* begin = keys.c_str() + i;
+        const size_t length = wcslen(begin);
+        if (length == 0)
+        {
+            break;
+        }
+        out.emplace_back(begin, length);
+        i += length + 1;
+    }
+    return out;
 }
 
 // Everything already stores its HTTP server config; read it so the feature works
@@ -133,11 +156,18 @@ void saveSettings()
     writeBool(L"IndexPathTools", settings.indexPathTools);
     writeBool(L"ShowLatency", settings.showLatency);
     writeBool(L"ShellUsesPowerShell", settings.shellUsesPowerShell);
+    writeBool(L"UseChromeTabs", settings.useChromeTabs);
     writeBool(L"UseSystemAccent", settings.useSystemAccent);
     writeInt(L"Appearance", static_cast<int>(settings.appearance));
     writeInt(L"MaxResults", settings.maxResults);
     writeInt(L"FileDepth", settings.fileDepth);
     writeInt(L"FileLimit", settings.fileLimit);
+
+    WritePrivateProfileStringW(L"ProviderShortcuts", nullptr, nullptr, path.c_str());
+    for (const auto& [providerId, shortcut] : settings.providerShortcuts)
+    {
+        WritePrivateProfileStringW(L"ProviderShortcuts", providerId.c_str(), shortcut.c_str(), path.c_str());
+    }
 }
 
 void loadSettings()
@@ -172,11 +202,17 @@ void loadSettings()
     settings.indexPathTools = readBool(L"IndexPathTools", settings.indexPathTools);
     settings.showLatency = readBool(L"ShowLatency", settings.showLatency);
     settings.shellUsesPowerShell = readBool(L"ShellUsesPowerShell", settings.shellUsesPowerShell);
+    settings.useChromeTabs = readBool(L"UseChromeTabs", settings.useChromeTabs);
     settings.useSystemAccent = readBool(L"UseSystemAccent", settings.useSystemAccent);
     settings.appearance = static_cast<Appearance>(readInt(L"Appearance", static_cast<int>(settings.appearance)));
     settings.maxResults = readInt(L"MaxResults", settings.maxResults);
     settings.fileDepth = readInt(L"FileDepth", settings.fileDepth);
     settings.fileLimit = readInt(L"FileLimit", settings.fileLimit);
+
+    for (const auto& key : readIniKeys(path, L"ProviderShortcuts"))
+    {
+        settings.providerShortcuts[key] = readIniString(path, L"ProviderShortcuts", key.c_str(), L"");
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_settingsMutex);
@@ -185,45 +221,51 @@ void loadSettings()
     saveSettings();
 }
 
+SettingRow makeSettingHeader(std::wstring text)
+{
+    SettingRow row;
+    row.isHeader = true;
+    row.header = std::move(text);
+    return row;
+}
+
+SettingRow makeSettingItem(SettingField field, SettingKind kind, std::wstring title, std::wstring subtitle,
+                           std::wstring providerId, std::wstring settingKey)
+{
+    SettingRow row;
+    row.isHeader = false;
+    row.item.field = field;
+    row.item.kind = kind;
+    row.item.title = std::move(title);
+    row.item.subtitle = std::move(subtitle);
+    row.item.providerId = std::move(providerId);
+    row.item.settingKey = std::move(settingKey);
+    return row;
+}
+
 const std::vector<SettingRow>& settingRows()
 {
     static const std::vector<SettingRow> rows = [] {
         std::vector<SettingRow> list;
         auto header = [&](const wchar_t* text) {
-            SettingRow row;
-            row.isHeader = true;
-            row.header = text;
-            list.push_back(row);
+            list.push_back(makeSettingHeader(text));
         };
         auto item = [&](SettingField field, SettingKind kind, const wchar_t* title, const wchar_t* subtitle) {
-            SettingRow row;
-            row.isHeader = false;
-            row.item = SettingItem{ field, kind, title, subtitle };
-            list.push_back(row);
+            list.push_back(makeSettingItem(field, kind, title, subtitle));
         };
 
         header(L"Appearance");
         item(SettingField::Appearance, SettingKind::Choice, L"Theme", L"Follow Windows, or pin QuickPal to dark or light");
         item(SettingField::UseSystemAccent, SettingKind::Toggle, L"System accent", L"Tint highlights with the Windows accent color");
 
-        header(L"File search");
-        item(SettingField::UseEverythingHttp, SettingKind::Toggle, L"Everything HTTP API", L"Query Everything's local HTTP server with saved credentials");
-        item(SettingField::EverythingHttpPort, SettingKind::Stepper, L"HTTP port", L"Port of the local Everything HTTP server — type a number to set it");
-        item(SettingField::UseEverything, SettingKind::Toggle, L"Everything SDK", L"Use Everything's indexed API for whole-machine file search");
-        item(SettingField::FallbackFileIndex, SettingKind::Toggle, L"Fallback file index", L"Background index used when the Everything SDK is unavailable");
-        item(SettingField::IndexDesktop, SettingKind::Toggle, L"Index Desktop", L"Include Desktop in the fallback file index");
-        item(SettingField::IndexDocuments, SettingKind::Toggle, L"Index Documents", L"Include Documents in the fallback file index");
-        item(SettingField::IndexDownloads, SettingKind::Toggle, L"Index Downloads", L"Include Downloads in the fallback file index");
-        item(SettingField::IndexDefaultPaths, SettingKind::Toggle, L"Default locations", L"Include profile, OneDrive, Public, and app folders");
-        item(SettingField::FileDepth, SettingKind::Stepper, L"Fallback depth", L"How many directory levels the background walk descends");
-        item(SettingField::FileLimit, SettingKind::Stepper, L"Fallback file cap", L"Maximum fallback file entries kept in memory");
-
-        header(L"Command sources");
-        item(SettingField::IndexStartMenu, SettingKind::Toggle, L"Start Menu apps", L"Index app shortcuts from the Start Menu folders");
-        item(SettingField::IndexPathTools, SettingKind::Toggle, L"PATH tools", L"Index executables and scripts discoverable through PATH");
+        const Settings snapshot = getSettingsSnapshot();
+        const ProviderContext ctx{ snapshot, nullptr };
+        for (const auto& provider : ProviderRegistry::instance().all())
+        {
+            provider->settings(ctx, list);
+        }
 
         header(L"Behavior");
-        item(SettingField::ShellUsesPowerShell, SettingKind::Toggle, L"Shell runner", L"Run > commands with PowerShell when on, cmd when off");
         item(SettingField::MaxResults, SettingKind::Stepper, L"Max results", L"Bounds ranking and rendering work per keystroke");
         item(SettingField::ShowLatency, SettingKind::Toggle, L"Latency readout", L"Show result timing in the footer");
 
@@ -286,6 +328,7 @@ bool isToggleSetting(SettingField field)
     case SettingField::IndexDefaultPaths:
     case SettingField::IndexStartMenu:
     case SettingField::IndexPathTools:
+    case SettingField::UseChromeTabs:
     case SettingField::ShellUsesPowerShell:
     case SettingField::ShowLatency:
         return true;
@@ -384,6 +427,7 @@ bool settingToggleValue(SettingField field, const Settings& settings)
     case SettingField::IndexDefaultPaths: return settings.indexDefaultPaths;
     case SettingField::IndexStartMenu: return settings.indexStartMenu;
     case SettingField::IndexPathTools: return settings.indexPathTools;
+    case SettingField::UseChromeTabs: return settings.useChromeTabs;
     case SettingField::ShellUsesPowerShell: return settings.shellUsesPowerShell;
     case SettingField::ShowLatency: return settings.showLatency;
     default: return false;
@@ -420,7 +464,56 @@ std::wstring settingValueText(SettingField field, const Settings& settings)
     {
         return L"Run";
     }
+    if (field == SettingField::InstallChromeExtension)
+    {
+        return L"Open";
+    }
     return settingToggleValue(field, settings) ? L"On" : L"Off";
+}
+
+std::wstring providerShortcutValue(const std::wstring& providerId)
+{
+    const Settings settings = getSettingsSnapshot();
+    const auto it = settings.providerShortcuts.find(providerId);
+    if (it == settings.providerShortcuts.end() || it->second.empty())
+    {
+        return L"None";
+    }
+    return it->second;
+}
+
+void setProviderShortcutValue(const std::wstring& providerId, const std::wstring& shortcut)
+{
+    if (providerId.empty())
+    {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        if (shortcut.empty() || shortcut == L"None")
+        {
+            g_settings.providerShortcuts.erase(providerId);
+        }
+        else
+        {
+            g_settings.providerShortcuts[providerId] = shortcut;
+        }
+    }
+    saveSettings();
+}
+
+std::wstring settingValueText(const SettingItem& item, const Settings& settings)
+{
+    if (item.field == SettingField::ProviderShortcut)
+    {
+        const auto it = settings.providerShortcuts.find(item.providerId);
+        if (it == settings.providerShortcuts.end() || it->second.empty())
+        {
+            return L"None";
+        }
+        return it->second;
+    }
+    return settingValueText(item.field, settings);
 }
 
 bool settingNeedsRebuild(SettingField field)
@@ -437,6 +530,7 @@ bool settingNeedsRebuild(SettingField field)
     case SettingField::IndexDefaultPaths:
     case SettingField::IndexStartMenu:
     case SettingField::IndexPathTools:
+    case SettingField::UseChromeTabs:
     case SettingField::FileDepth:
     case SettingField::FileLimit:
     case SettingField::ReloadIndexes:
@@ -527,6 +621,7 @@ static void mutateLocked(SettingField field, int direction)
     case SettingField::IndexDefaultPaths: g_settings.indexDefaultPaths = !g_settings.indexDefaultPaths; break;
     case SettingField::IndexStartMenu: g_settings.indexStartMenu = !g_settings.indexStartMenu; break;
     case SettingField::IndexPathTools: g_settings.indexPathTools = !g_settings.indexPathTools; break;
+    case SettingField::UseChromeTabs: g_settings.useChromeTabs = !g_settings.useChromeTabs; break;
     case SettingField::ShellUsesPowerShell: g_settings.shellUsesPowerShell = !g_settings.shellUsesPowerShell; break;
     case SettingField::ShowLatency: g_settings.showLatency = !g_settings.showLatency; break;
     case SettingField::MaxResults:
@@ -539,6 +634,9 @@ static void mutateLocked(SettingField field, int direction)
         g_settings.fileLimit = stepLadder(stepperSpec(field), g_settings.fileLimit, direction);
         break;
     case SettingField::ReloadIndexes:
+    case SettingField::ProviderShortcut:
+    case SettingField::ProviderAction:
+    case SettingField::InstallChromeExtension:
         break;
     }
     g_settings = normalizedSettings(g_settings);

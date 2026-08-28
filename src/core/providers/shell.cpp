@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 #include <shellapi.h>
@@ -51,6 +52,15 @@ public:
             ShellExecuteW(nullptr, L"open", L"cmd.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
         }
         return true;
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Shell"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open shell command runner directly", info().id));
+        out.push_back(makeSettingItem(SettingField::ShellUsesPowerShell, SettingKind::Toggle,
+                                      L"PowerShell", L"Run shell commands through PowerShell when enabled"));
     }
 };
 }

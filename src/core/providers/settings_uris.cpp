@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 namespace
@@ -47,6 +48,13 @@ public:
             command.searchText += lowerCopy(entry.keywords);
             out.push_back(std::move(command));
         }
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Windows settings"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open Windows settings search directly", info().id));
     }
 };
 }

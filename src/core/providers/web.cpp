@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 #include <shellapi.h>
@@ -39,6 +40,13 @@ public:
         const std::wstring url = L"https://www.google.com/search?q=" + urlEncode(command.arg);
         ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return true;
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Web search"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open web search directly", info().id));
     }
 };
 }

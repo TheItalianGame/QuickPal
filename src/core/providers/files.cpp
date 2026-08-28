@@ -349,6 +349,33 @@ public:
         }
     }
 
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Files / Everything"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open file search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::UseEverythingHttp, SettingKind::Toggle,
+                                      L"Everything HTTP API", L"Use Everything's local HTTP server first"));
+        out.push_back(makeSettingItem(SettingField::EverythingHttpPort, SettingKind::Stepper,
+                                      L"Everything HTTP port", L"Port from Tools > Options > HTTP Server"));
+        out.push_back(makeSettingItem(SettingField::UseEverything, SettingKind::Toggle,
+                                      L"Everything SDK", L"Use Everything64.dll when HTTP is not available"));
+        out.push_back(makeSettingItem(SettingField::FallbackFileIndex, SettingKind::Toggle,
+                                      L"Fallback index", L"Scan selected local folders if Everything is unavailable"));
+        out.push_back(makeSettingItem(SettingField::IndexDefaultPaths, SettingKind::Toggle,
+                                      L"Default paths", L"Include profile, OneDrive, public folders, apps, and program files"));
+        out.push_back(makeSettingItem(SettingField::IndexDesktop, SettingKind::Toggle,
+                                      L"Desktop", L"Include your Desktop in the fallback index"));
+        out.push_back(makeSettingItem(SettingField::IndexDocuments, SettingKind::Toggle,
+                                      L"Documents", L"Include your Documents in the fallback index"));
+        out.push_back(makeSettingItem(SettingField::IndexDownloads, SettingKind::Toggle,
+                                      L"Downloads", L"Include your Downloads in the fallback index"));
+        out.push_back(makeSettingItem(SettingField::FileDepth, SettingKind::Stepper,
+                                      L"Fallback depth", L"Maximum folder depth for local scans"));
+        out.push_back(makeSettingItem(SettingField::FileLimit, SettingKind::Stepper,
+                                      L"Fallback file cap", L"Maximum entries kept in the fallback index"));
+    }
+
 private:
     AsyncEverythingSearch async_;
 };

@@ -157,6 +157,7 @@ const wchar_t* queryModeLabel(QueryMode mode)
     case QueryMode::Windows: return L"WINDOWS";
     case QueryMode::Processes: return L"PROCESSES";
     case QueryMode::Clipboard: return L"CLIPBOARD";
+    case QueryMode::BrowserTabs: return L"TABS";
     case QueryMode::Actions: return L"ACTIONS";
     default: return nullptr;
     }

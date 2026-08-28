@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 constexpr wchar_t kWindowClass[] = L"QuickPal.Native.Window";
@@ -51,6 +52,7 @@ enum class CommandKind
     QuickLink,
     Clipboard,
     Process,
+    ChromeTab,
     Action,
 };
 
@@ -97,6 +99,7 @@ enum class QueryMode
     Windows,
     Processes,
     Clipboard,
+    BrowserTabs,
     Actions,
 };
 
@@ -137,6 +140,7 @@ struct Settings
     bool indexPathTools = true;
     bool showLatency = true;
     bool shellUsesPowerShell = true;
+    bool useChromeTabs = true;
     bool useSystemAccent = true;
     Appearance appearance = Appearance::System;
     int maxResults = kDefaultMaxResults;
@@ -149,6 +153,10 @@ struct Settings
     std::wstring everythingHttpUsername;
     std::wstring everythingHttpPassword;
     int everythingHttpPort = 2342;
+
+    std::unordered_map<std::wstring, std::wstring> providerShortcuts = {
+        { L"files", L"Alt+E" },
+    };
 };
 
 enum class UiMode

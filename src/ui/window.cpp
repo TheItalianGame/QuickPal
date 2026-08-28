@@ -1,11 +1,14 @@
 #include "window.h"
 
 #include "../app.h"
+#include "../core/chrome_bridge.h"
 #include "../core/clipboard_history.h"
 #include "../core/frecency.h"
 #include "../core/indexer.h"
+#include "../core/provider.h"
 #include "../core/search.h"
 #include "../core/settings.h"
+#include "../core/shortcuts.h"
 #include "../core/util.h"
 #include "icons.h"
 #include "layout.h"
@@ -26,6 +29,9 @@ constexpr DWORD kDwmUseImmersiveDarkMode = 20;
 constexpr DWORD kDwmWindowCornerPreference = 33;
 constexpr DWORD kDwmBorderColor = 34;
 constexpr DWORD kDwmCornerRound = 2;
+constexpr int kProviderHotkeyBase = 8000;
+
+std::vector<std::wstring> g_providerHotkeyIds;
 
 void executeCommand(const Command& command);
 
@@ -51,6 +57,67 @@ void invalidate()
     if (g_app.hwnd)
     {
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
+    }
+}
+
+void cancelShortcutCapture()
+{
+    g_app.capturingShortcut = false;
+    g_app.capturingShortcutProvider.clear();
+}
+
+std::wstring providerIdForHotkey(WPARAM id)
+{
+    if (id < kProviderHotkeyBase)
+    {
+        return {};
+    }
+    const size_t index = static_cast<size_t>(id - kProviderHotkeyBase);
+    return index < g_providerHotkeyIds.size() ? g_providerHotkeyIds[index] : std::wstring{};
+}
+
+void unregisterProviderHotkeys(HWND hwnd)
+{
+    for (size_t i = 0; i < g_providerHotkeyIds.size(); ++i)
+    {
+        UnregisterHotKey(hwnd, kProviderHotkeyBase + static_cast<int>(i));
+    }
+    g_providerHotkeyIds.clear();
+}
+
+void registerProviderHotkeys(HWND hwnd)
+{
+    if (!hwnd)
+    {
+        return;
+    }
+
+    unregisterProviderHotkeys(hwnd);
+    const Settings settings = getSettingsSnapshot();
+    for (const auto& provider : ProviderRegistry::instance().all())
+    {
+        const std::wstring providerId = provider->info().id;
+        const auto it = settings.providerShortcuts.find(providerId);
+        if (it == settings.providerShortcuts.end())
+        {
+            continue;
+        }
+
+        const auto shortcut = parseShortcutText(it->second);
+        if (!shortcut)
+        {
+            continue;
+        }
+
+        const int hotkeyId = kProviderHotkeyBase + static_cast<int>(g_providerHotkeyIds.size());
+        if (RegisterHotKey(hwnd, hotkeyId, shortcut->modifiers | MOD_NOREPEAT, shortcut->vk))
+        {
+            g_providerHotkeyIds.push_back(providerId);
+        }
+        else
+        {
+            setTransientStatus(L"Shortcut unavailable: " + shortcut->text);
+        }
     }
 }
 
@@ -594,6 +661,60 @@ void cancelNumberEdit()
     g_app.numberBuffer.clear();
 }
 
+void beginShortcutCapture(const std::wstring& providerId)
+{
+    cancelNumberEdit();
+    g_app.capturingShortcut = true;
+    g_app.capturingShortcutProvider = providerId;
+    setTransientStatus(L"Press a shortcut. Backspace clears, Esc cancels.");
+    invalidate();
+}
+
+void finishShortcutCapture(WPARAM key)
+{
+    if (!g_app.capturingShortcut)
+    {
+        return;
+    }
+
+    if (key == VK_ESCAPE)
+    {
+        cancelShortcutCapture();
+        clearTransientStatus();
+        invalidate();
+        return;
+    }
+
+    if (key == VK_BACK || key == VK_DELETE)
+    {
+        setProviderShortcutValue(g_app.capturingShortcutProvider, L"");
+        cancelShortcutCapture();
+        registerProviderHotkeys(g_app.hwnd);
+        setTransientStatus(L"Provider shortcut cleared.");
+        invalidate();
+        return;
+    }
+
+    if (isModifierKey(key))
+    {
+        return;
+    }
+
+    const auto shortcut = shortcutFromKeyState(key);
+    if (!shortcut)
+    {
+        setTransientStatus(L"Shortcut needs Ctrl, Alt, Shift, or Win.");
+        invalidate();
+        return;
+    }
+
+    setProviderShortcutValue(g_app.capturingShortcutProvider, shortcut->text);
+    cancelShortcutCapture();
+    registerProviderHotkeys(g_app.hwnd);
+    setTransientStatus(L"Provider shortcut set to " + shortcut->text + L".");
+    invalidate();
+}
+
 void applySettingAt(int rowIndex, int direction)
 {
     const auto& rows = settingRows();
@@ -603,7 +724,21 @@ void applySettingAt(int rowIndex, int direction)
     }
 
     cancelNumberEdit();
-    const SettingField field = rows[rowIndex].item.field;
+    const SettingItem& item = rows[rowIndex].item;
+    const SettingField field = item.field;
+    if (field == SettingField::ProviderShortcut)
+    {
+        beginShortcutCapture(item.providerId);
+        return;
+    }
+    if (field == SettingField::InstallChromeExtension)
+    {
+        openChromeExtensionInstallLocation();
+        setTransientStatus(L"Opened Chrome extension folder and chrome://extensions.");
+        invalidate();
+        return;
+    }
+
     const SettingChange change = applySetting(field, direction);
 
     if (change.needsThemeRefresh)
@@ -765,6 +900,12 @@ void handlePaletteKey(WPARAM key)
 
 void handleSettingsKey(WPARAM key)
 {
+    if (g_app.capturingShortcut)
+    {
+        finishShortcutCapture(key);
+        return;
+    }
+
     const auto& rows = settingRows();
     switch (key)
     {
@@ -851,7 +992,9 @@ void refreshResults()
     }
 
     const Settings settings = getSettingsSnapshot();
-    SearchOutput output = runSearch(g_app.editor.text(), settings, g_app.hwnd);
+    SearchOutput output = g_app.forcedProviderId.empty()
+        ? runSearch(g_app.editor.text(), settings, g_app.hwnd)
+        : runProviderSearch(g_app.editor.text(), g_app.forcedProviderId.c_str(), settings, g_app.hwnd);
 
     const size_t previousCount = g_app.results.size();
     g_app.results = std::move(output.results);
@@ -945,12 +1088,41 @@ void showPalette()
     g_app.actionMenu = false;
     g_app.actionTarget = Command{};
     g_app.actionReturnText.clear();
+    g_app.forcedProviderId.clear();
     g_app.editor.clear();
     g_app.queryScrollX = 0.0f;
     g_app.selected = 0;
     g_app.hovered = -1;
     g_app.pressedPaletteRow = -1;
     cancelNumberEdit();
+    cancelShortcutCapture();
+
+    refreshTheme();
+    applyWindowChrome(g_app.hwnd, g_app.theme);
+    refreshResults();
+    positionWindow();
+
+    ShowWindow(g_app.hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(g_app.hwnd);
+    SetFocus(g_app.hwnd);
+    resetCaretBlink();
+}
+
+void showProviderPalette(const std::wstring& providerId)
+{
+    g_app.visible = true;
+    g_app.mode = UiMode::Palette;
+    g_app.actionMenu = false;
+    g_app.actionTarget = Command{};
+    g_app.actionReturnText.clear();
+    g_app.forcedProviderId = providerId;
+    g_app.editor.clear();
+    g_app.queryScrollX = 0.0f;
+    g_app.selected = 0;
+    g_app.hovered = -1;
+    g_app.pressedPaletteRow = -1;
+    cancelNumberEdit();
+    cancelShortcutCapture();
 
     refreshTheme();
     applyWindowChrome(g_app.hwnd, g_app.theme);
@@ -967,6 +1139,7 @@ void showSettings()
 {
     g_app.visible = true;
     g_app.mode = UiMode::Settings;
+    g_app.forcedProviderId.clear();
     g_app.hovered = -1;
     g_app.settingsHovered = -1;
     g_app.pressedRow = -1;
@@ -999,6 +1172,8 @@ void hidePalette()
     g_app.actionMenu = false;
     g_app.actionTarget = Command{};
     g_app.actionReturnText.clear();
+    g_app.forcedProviderId.clear();
+    cancelShortcutCapture();
     if (g_app.hwnd)
     {
         KillTimer(g_app.hwnd, kCaretTimerId);
@@ -1053,6 +1228,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         captureClipboardHistory(hwnd);
         g_app.icons.start(hwnd);
         RegisterHotKey(hwnd, kHotkeyId, MOD_ALT | MOD_NOREPEAT, L'Q');
+        registerProviderHotkeys(hwnd);
         rebuildIndexAsync();
         return 0;
 
@@ -1094,6 +1270,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             else
             {
                 showPalette();
+            }
+            return 0;
+        }
+        if (const std::wstring providerId = providerIdForHotkey(wParam); !providerId.empty())
+        {
+            if (g_app.visible && g_app.mode == UiMode::Palette && g_app.forcedProviderId == providerId)
+            {
+                hidePalette();
+            }
+            else
+            {
+                showProviderPalette(providerId);
             }
             return 0;
         }
@@ -1190,7 +1378,28 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
 
+    case WM_SYSKEYDOWN:
+        if (g_app.mode == UiMode::Settings && g_app.capturingShortcut)
+        {
+            handleSettingsKey(wParam);
+            return 0;
+        }
+        break;
+
+    case WM_SYSCHAR:
+        if (g_app.mode == UiMode::Settings && g_app.capturingShortcut)
+        {
+            return 0;
+        }
+        break;
+
     case WM_KEYDOWN:
+        if (g_app.mode == UiMode::Settings && g_app.capturingShortcut)
+        {
+            handleSettingsKey(wParam);
+            return 0;
+        }
+
         if (ctrlDown())
         {
             switch (wParam)
@@ -1281,6 +1490,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (g_app.mode == UiMode::Settings)
         {
             // Typing a number on a stepper row beats pressing + thirty times.
+            if (g_app.capturingShortcut)
+            {
+                return 0;
+            }
             const auto& rows = settingRows();
             const int index = g_app.settingsSelected;
             if (std::iswdigit(ch) && index >= 0 && index < static_cast<int>(rows.size()) &&
@@ -1559,6 +1772,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         KillTimer(hwnd, kCaretTimerId);
         UnregisterHotKey(hwnd, kHotkeyId);
+        unregisterProviderHotkeys(hwnd);
         RemoveClipboardFormatListener(hwnd);
         g_app.icons.stop();
         g_app.graphics.destroy();

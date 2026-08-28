@@ -58,6 +58,23 @@ void addFallbackActions(const Query& query, ResultSink& sink)
         sink.add(std::move(shell), 8800);
     }
 }
+
+Query makeScopedQuery(const std::wstring& rawInput, const ProviderInfo& info)
+{
+    Query query;
+    query.raw = trimCopy(rawInput);
+    query.lower = lowerCopy(query.raw);
+    query.terms = splitTerms(query.lower);
+
+    if (!info.prefixes.empty())
+    {
+        query.prefix = info.prefixes.front();
+        query.body = query.raw;
+        query.bodyLower = query.lower;
+        query.bodyTerms = query.terms;
+    }
+    return query;
+}
 }
 
 SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, HWND self)
@@ -150,4 +167,49 @@ bool executeThroughProvider(const Command& command, const Settings& settings, HW
     }
     const ProviderContext ctx{ settings, self };
     return provider->execute(ctx, command);
+}
+
+SearchOutput runProviderSearch(const std::wstring& rawQuery, const wchar_t* providerId,
+                               const Settings& settings, HWND self)
+{
+    LARGE_INTEGER frequency{};
+    LARGE_INTEGER start{};
+    LARGE_INTEGER end{};
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+
+    SearchOutput out;
+    Provider* provider = ProviderRegistry::instance().byId(providerId);
+    if (!provider)
+    {
+        return runSearch(rawQuery, settings, self);
+    }
+
+    const ProviderContext ctx{ settings, self };
+    const ProviderInfo info = provider->info();
+    const Query query = makeScopedQuery(rawQuery, info);
+    ResultSink sink(settings.maxResults);
+
+    out.mode = info.mode;
+    out.highlightTerms = query.terms;
+    runProvider(provider, ctx, query, sink);
+
+    {
+        std::shared_lock<std::shared_mutex> lock(indexMutex());
+        for (const auto& command : staticIndexUnlocked())
+        {
+            if (command.provider && wcscmp(command.provider, info.id) == 0)
+            {
+                sink.addScored(command, query.terms);
+            }
+        }
+    }
+
+    out.results = sink.take();
+
+    QueryPerformanceCounter(&end);
+    out.elapsedMs = frequency.QuadPart > 0
+        ? (static_cast<double>(end.QuadPart - start.QuadPart) * 1000.0) / static_cast<double>(frequency.QuadPart)
+        : 0.0;
+    return out;
 }

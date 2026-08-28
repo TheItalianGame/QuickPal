@@ -151,6 +151,13 @@ public:
         return true;
     }
 
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Quicklinks"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open quicklink aliases directly", info().id));
+    }
+
 private:
     void refresh() const
     {

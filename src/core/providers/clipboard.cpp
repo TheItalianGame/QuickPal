@@ -1,6 +1,7 @@
 #include "providers.h"
 
 #include "../clipboard_history.h"
+#include "../settings.h"
 #include "../util.h"
 
 namespace
@@ -60,6 +61,13 @@ public:
         copyTextToClipboard(ctx.window, command.arg);
         return true;
     }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Clipboard"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open clipboard history directly", info().id));
+    }
 };
 }
 
@@ -67,4 +75,3 @@ std::unique_ptr<Provider> makeClipboardProvider()
 {
     return std::make_unique<ClipboardProvider>();
 }
-

@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 namespace
@@ -84,6 +85,13 @@ public:
         }
         SetForegroundWindow(command.hwnd);
         return true;
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Open windows"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open window switcher directly", info().id));
     }
 };
 }

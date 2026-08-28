@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 #include <filesystem>
@@ -67,6 +68,15 @@ public:
                 out.push_back(makeCommand(CommandKind::PathTool, stripExtension(name), L"PATH tool", entry.path().wstring(), 3100));
             }
         }
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"PATH tools"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open PATH tool search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::IndexPathTools, SettingKind::Toggle,
+                                      L"Index PATH", L"Add executables, cmd files, and bat files from PATH"));
     }
 };
 }

@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 #include <filesystem>
@@ -66,6 +67,15 @@ public:
         seen.reserve(2048);
         scanShortcuts(out, seen, expandEnv(L"%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs"));
         scanShortcuts(out, seen, expandEnv(L"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs"));
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Start Menu apps"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open Start Menu app search directly", info().id));
+        out.push_back(makeSettingItem(SettingField::IndexStartMenu, SettingKind::Toggle,
+                                      L"Index apps", L"Scan Start Menu shortcuts and Store apps"));
     }
 };
 }

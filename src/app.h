@@ -37,6 +37,7 @@ struct AppState
 
     std::vector<Result> results;
     QueryMode queryMode = QueryMode::Commands;
+    std::wstring forcedProviderId;
     std::vector<std::wstring> highlightTerms;
     int selected = 0;
     int hovered = -1;
@@ -53,6 +54,8 @@ struct AppState
     // instead of requiring dozens of button presses.
     bool editingNumber = false;
     std::wstring numberBuffer;
+    bool capturingShortcut = false;
+    std::wstring capturingShortcutProvider;
 
     int pressedRow = -1;
     PressedPart pressedPart = PressedPart::None;

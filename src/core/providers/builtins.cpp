@@ -1,5 +1,6 @@
 #include "providers.h"
 
+#include "../settings.h"
 #include "../util.h"
 
 namespace
@@ -49,6 +50,13 @@ public:
         }
         // Everything else is a path or URI; let the shared handler open it.
         return false;
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Commands"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open built-in commands directly", info().id));
     }
 };
 }

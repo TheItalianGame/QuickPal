@@ -1,4 +1,5 @@
 #include "app.h"
+#include "core/chrome_bridge.h"
 #include "core/frecency.h"
 #include "core/providers/providers.h"
 #include "core/settings.h"
@@ -28,6 +29,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 
     // Must happen before the first index rebuild, which is kicked off in WM_CREATE.
     registerBuiltinProviders();
+    registerChromeNativeMessagingHost();
 
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"QuickPal.Native.SingleInstance");
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS)

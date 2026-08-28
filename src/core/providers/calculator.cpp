@@ -1,6 +1,7 @@
 #include "providers.h"
 
 #include "../expression.h"
+#include "../settings.h"
 #include "../util.h"
 
 namespace
@@ -54,6 +55,13 @@ public:
         }
         copyTextToClipboard(ctx.window, command.arg);
         return true;
+    }
+
+    void settings(const ProviderContext&, std::vector<SettingRow>& out) override
+    {
+        out.push_back(makeSettingHeader(L"Calculator"));
+        out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
+                                      L"Shortcut", L"Open calculator directly", info().id));
     }
 };
 }

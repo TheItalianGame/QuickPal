@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "QuickPal Chrome Tabs",
+  "description": "Shares open Chrome tabs with QuickPal and lets QuickPal focus them.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "105",
+  "permissions": [
+    "tabs",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzG7e1CkY7nE5LDGs5PUw5brDxUwyAk1Z+0gkwsX4nn3u1U9JBuXWeW3igZdITMdbCPU2h2oas9CqBK7aWAxRHkvLRXRmDJQoC7L98GyHo+W3mjJoLb0VcbihSt/5k7ff0qYKiqSFdXLSOddj6KOe8OVLdflfV5Dj3Tm2Da2Dd5ZVQcQrUvjtIZL2ECKrzWPzV1EaZ+ZNZ24ZqqYE+MRE461GD+o9tOV65igBiSWcafwfKUluYyw7/JfunfXi2a7f51U1crX9e4kCdWpq82KX+ZzK4Ke3HzfMn4//ULo2hjcI1142CFqcAmtHgcWdBwKRntQfY3F4gMeG3yPYiPhN3QIDAQAB"
+}

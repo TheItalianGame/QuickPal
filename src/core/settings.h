@@ -33,8 +33,12 @@ enum class SettingField
     IndexStartMenu,
     IndexPathTools,
     ShellUsesPowerShell,
+    UseChromeTabs,
     MaxResults,
     ShowLatency,
+    ProviderShortcut,
+    ProviderAction,
+    InstallChromeExtension,
     ReloadIndexes,
 };
 
@@ -50,8 +54,10 @@ struct SettingItem
 {
     SettingField field = SettingField::ShowLatency;
     SettingKind kind = SettingKind::Toggle;
-    const wchar_t* title = L"";
-    const wchar_t* subtitle = L"";
+    std::wstring title;
+    std::wstring subtitle;
+    std::wstring providerId;
+    std::wstring settingKey;
 };
 
 // A flattened list of section headers and interactive rows. Both the painter and
@@ -59,9 +65,13 @@ struct SettingItem
 struct SettingRow
 {
     bool isHeader = false;
-    const wchar_t* header = nullptr;
+    std::wstring header;
     SettingItem item;
 };
+
+SettingRow makeSettingHeader(std::wstring text);
+SettingRow makeSettingItem(SettingField field, SettingKind kind, std::wstring title, std::wstring subtitle,
+                           std::wstring providerId = L"", std::wstring settingKey = L"");
 
 const std::vector<SettingRow>& settingRows();
 
@@ -90,6 +100,10 @@ int settingChoiceIndex(SettingField field, const Settings& settings);
 
 bool settingToggleValue(SettingField field, const Settings& settings);
 std::wstring settingValueText(SettingField field, const Settings& settings);
+std::wstring settingValueText(const SettingItem& item, const Settings& settings);
+
+std::wstring providerShortcutValue(const std::wstring& providerId);
+void setProviderShortcutValue(const std::wstring& providerId, const std::wstring& shortcut);
 
 bool settingNeedsRebuild(SettingField field);
 bool settingNeedsRepaintOnly(SettingField field);

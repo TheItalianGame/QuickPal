@@ -25,4 +25,5 @@ void registerBuiltinProviders()
     registry.add(makeCalculatorProvider());
     registry.add(makeProcessesProvider());
     registry.add(makeClipboardProvider());
+    registry.add(makeChromeTabsProvider());
 }

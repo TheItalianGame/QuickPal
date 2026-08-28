@@ -20,6 +20,7 @@ std::unique_ptr<Provider> makeWebProvider();
 std::unique_ptr<Provider> makeCalculatorProvider();
 std::unique_ptr<Provider> makeProcessesProvider();
 std::unique_ptr<Provider> makeClipboardProvider();
+std::unique_ptr<Provider> makeChromeTabsProvider();
 
 // Called once at startup, before the first index rebuild.
 void registerBuiltinProviders();
