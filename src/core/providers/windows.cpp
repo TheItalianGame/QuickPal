@@ -3,6 +3,8 @@
 #include "../settings.h"
 #include "../util.h"
 
+#include <unordered_map>
+
 namespace
 {
 struct EnumContext
@@ -10,7 +12,39 @@ struct EnumContext
     const std::vector<std::wstring>* terms;
     HWND self;
     ResultSink* sink;
+    bool focusedMode = false;
+    std::unordered_map<DWORD, std::wstring> processNames;
 };
+
+std::wstring processNameForWindow(EnumContext& ctx, HWND hwnd)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0)
+    {
+        return {};
+    }
+
+    if (const auto it = ctx.processNames.find(pid); it != ctx.processNames.end())
+    {
+        return it->second;
+    }
+
+    std::wstring name;
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid))
+    {
+        wchar_t path[1024]{};
+        DWORD length = static_cast<DWORD>(std::size(path));
+        if (QueryFullProcessImageNameW(process, 0, path, &length) && length > 0)
+        {
+            name = fileNameFromPath(std::wstring(path, length));
+        }
+        CloseHandle(process);
+    }
+
+    ctx.processNames[pid] = name;
+    return name;
+}
 
 BOOL CALLBACK enumProc(HWND hwnd, LPARAM lParam)
 {
@@ -40,14 +74,28 @@ BOOL CALLBACK enumProc(HWND hwnd, LPARAM lParam)
         return TRUE;
     }
 
-    Command command = makeCommand(CommandKind::Window, title, L"Open window", title, 5100);
+    const std::wstring processName = processNameForWindow(*ctx, hwnd);
+    std::wstring subtitle = L"Open window";
+    if (!processName.empty())
+    {
+        subtitle += L" - " + processName;
+    }
+
+    Command command = makeCommand(CommandKind::Window, title, subtitle, title, 5600);
+    if (!processName.empty())
+    {
+        command.searchText += L" " + lowerCopy(processName) + L" " + lowerCopy(stripExtension(processName));
+    }
     command.hwnd = hwnd;
 
     const int score = scoreCommandTerms(*ctx->terms, command);
     if (score >= 0)
     {
-        // Live windows outrank indexed commands with the same text.
-        ctx->sink->add(std::move(command), score + 12000);
+        // Bare queries should prefer a matching live window over launching a
+        // second copy of the same app. The focused "win" mode gets an even
+        // larger boost because it owns the whole result list.
+        const int boost = ctx->focusedMode ? 22000 : 19000;
+        ctx->sink->add(std::move(command), score + boost);
     }
     return TRUE;
 }
@@ -62,14 +110,20 @@ public:
         info.title = L"Open windows";
         info.prefixes = { L"win", L"window" };
         info.mode = QueryMode::Windows;
-        info.exclusive = false;
+        info.exclusive = true;
+        info.runsUnprefixed = true;
         return info;
     }
 
     void query(const ProviderContext& ctx, const Query& q, ResultSink& sink) override
     {
         const auto terms = q.subjectTerms();
-        EnumContext enumCtx{ &terms, ctx.window, &sink };
+        if (!q.hasPrefix() && terms.empty())
+        {
+            return;
+        }
+
+        EnumContext enumCtx{ &terms, ctx.window, &sink, q.hasPrefix() };
         EnumWindows(enumProc, reinterpret_cast<LPARAM>(&enumCtx));
     }
 
