@@ -234,5 +234,7 @@ Command makeCommand(CommandKind kind, std::wstring title, std::wstring subtitle,
     command.arg = std::move(arg);
     command.weight = weight;
     command.searchText = lowerCopy(command.title + L" " + command.subtitle + L" " + command.arg);
+    command.key = std::to_wstring(static_cast<int>(command.kind)) + L"|" +
+        (command.arg.empty() ? lowerCopy(command.title) : lowerCopy(command.arg));
     return command;
 }

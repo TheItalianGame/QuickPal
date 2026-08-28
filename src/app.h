@@ -41,6 +41,10 @@ struct AppState
     int selected = 0;
     int hovered = -1;
 
+    bool actionMenu = false;
+    Command actionTarget;
+    std::wstring actionReturnText;
+
     int settingsSelected = 0;
     int settingsHovered = -1;
     float settingsScroll = 0.0f;

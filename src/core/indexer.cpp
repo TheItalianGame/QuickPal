@@ -1,9 +1,8 @@
 #include "indexer.h"
 
+#include "provider.h"
 #include "settings.h"
 #include "util.h"
-
-#include <shlobj.h>
 
 #include <algorithm>
 #include <atomic>
@@ -41,138 +40,6 @@ void notifyIndexChanged()
     if (HWND hwnd = g_notifyWindow.load())
     {
         PostMessageW(hwnd, kIndexUpdatedMessage, 0, 0);
-    }
-}
-
-void addBuiltins(std::vector<Command>& commands)
-{
-    commands.push_back(makeCommand(CommandKind::ReloadIndex, L"Reload indexes", L"Refresh apps, PATH tools, and file index", L"", 5200));
-    commands.push_back(makeCommand(CommandKind::OpenSettings, L"QuickPal settings", L"Native settings UI", L"", 5150));
-    commands.push_back(makeCommand(CommandKind::OpenCalculator, L"Calculator", L"Built-in local calculator", L"=", 5125));
-    commands.push_back(makeCommand(CommandKind::ExitApp, L"Exit QuickPal", L"Quit the background hotkey listener", L"", 3000));
-    commands.push_back(makeCommand(CommandKind::Builtin, L"Open Terminal", L"Windows Terminal", L"wt.exe", 5000));
-    commands.push_back(makeCommand(CommandKind::Builtin, L"Open PowerShell", L"PowerShell", L"powershell.exe", 4900));
-    commands.push_back(makeCommand(CommandKind::Builtin, L"Open Command Prompt", L"cmd.exe", L"cmd.exe", 4800));
-    commands.push_back(makeCommand(CommandKind::Builtin, L"Open File Explorer", L"Explorer", L"explorer.exe", 4700));
-    commands.push_back(makeCommand(CommandKind::Builtin, L"Open Task Manager", L"System monitor", L"taskmgr.exe", 4600));
-    commands.push_back(makeCommand(CommandKind::Builtin, L"Lock workstation", L"Win32 LockWorkStation API", L"lock", 4300));
-    commands.push_back(makeCommand(CommandKind::Builtin, L"Open PowerToys Command Palette source", L"GitHub: microsoft/PowerToys/src/modules/cmdpal", L"https://github.com/microsoft/PowerToys/tree/main/src/modules/cmdpal", 4200));
-
-    const std::wstring profile = env(L"USERPROFILE");
-    if (!profile.empty())
-    {
-        commands.push_back(makeCommand(CommandKind::Folder, L"Open Desktop", L"User folder", profile + L"\\Desktop", 4200));
-        commands.push_back(makeCommand(CommandKind::Folder, L"Open Documents", L"User folder", profile + L"\\Documents", 4200));
-        commands.push_back(makeCommand(CommandKind::Folder, L"Open Downloads", L"User folder", profile + L"\\Downloads", 4200));
-    }
-}
-
-void addSettingsUris(std::vector<Command>& commands)
-{
-    struct SettingUri
-    {
-        const wchar_t* title;
-        const wchar_t* uri;
-        const wchar_t* keywords;
-    };
-
-    constexpr SettingUri entries[] = {
-        { L"Settings", L"ms-settings:", L"windows settings control panel preferences" },
-        { L"Display settings", L"ms-settings:display", L"monitor resolution brightness scale night light" },
-        { L"Sound settings", L"ms-settings:sound", L"audio volume microphone input output" },
-        { L"Bluetooth settings", L"ms-settings:bluetooth", L"devices mouse keyboard headset" },
-        { L"Network settings", L"ms-settings:network", L"wifi ethernet vpn internet adapter" },
-        { L"Apps settings", L"ms-settings:appsfeatures", L"installed uninstall default apps" },
-        { L"Startup apps", L"ms-settings:startupapps", L"startup login launch boot" },
-        { L"Power and battery", L"ms-settings:powersleep", L"sleep energy battery power" },
-        { L"Windows Update", L"ms-settings:windowsupdate", L"updates restart history optional" },
-        { L"Privacy settings", L"ms-settings:privacy", L"permissions camera microphone location" },
-        { L"Clipboard settings", L"ms-settings:clipboard", L"clipboard history paste sync" },
-        { L"Developer settings", L"ms-settings:developers", L"developer mode terminal explorer sudo" },
-    };
-
-    for (const auto& entry : entries)
-    {
-        Command command = makeCommand(CommandKind::Setting, entry.title, L"Windows Settings API URI", entry.uri, 4400);
-        command.searchText += L" ";
-        command.searchText += lowerCopy(entry.keywords);
-        commands.push_back(std::move(command));
-    }
-}
-
-void addShortcutCommands(std::vector<Command>& commands, std::unordered_set<std::wstring>& seen, const std::wstring& root)
-{
-    if (root.empty())
-    {
-        return;
-    }
-
-    std::error_code ec;
-    if (!fs::exists(root, ec))
-    {
-        return;
-    }
-
-    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
-    const fs::recursive_directory_iterator end;
-    for (; it != end && !ec; it.increment(ec))
-    {
-        if (!it->is_regular_file(ec))
-        {
-            continue;
-        }
-        const std::wstring path = it->path().wstring();
-        const std::wstring ext = extensionLower(path);
-        if (ext != L".lnk" && ext != L".url" && ext != L".appref-ms")
-        {
-            continue;
-        }
-        const std::wstring key = lowerCopy(path);
-        if (!seen.insert(key).second)
-        {
-            continue;
-        }
-        commands.push_back(makeCommand(CommandKind::App, stripExtension(fileNameFromPath(path)), L"Start Menu app", path, 3800));
-    }
-}
-
-void addPathTools(std::vector<Command>& commands, std::unordered_set<std::wstring>& seen)
-{
-    const std::wstring pathEnv = env(L"Path");
-    std::wstringstream stream(pathEnv);
-    std::wstring rawDir;
-    while (std::getline(stream, rawDir, L';'))
-    {
-        const std::wstring dir = trimCopy(expandEnv(rawDir));
-        if (dir.empty())
-        {
-            continue;
-        }
-
-        std::error_code ec;
-        if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
-        {
-            continue;
-        }
-
-        for (const auto& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied, ec))
-        {
-            if (ec || !entry.is_regular_file(ec))
-            {
-                continue;
-            }
-            const std::wstring ext = extensionLower(entry.path().wstring());
-            if (ext != L".exe" && ext != L".cmd" && ext != L".bat")
-            {
-                continue;
-            }
-            const std::wstring name = entry.path().filename().wstring();
-            if (!seen.insert(L"path:" + lowerCopy(name)).second)
-            {
-                continue;
-            }
-            commands.push_back(makeCommand(CommandKind::PathTool, stripExtension(name), L"PATH tool", entry.path().wstring(), 3100));
-        }
     }
 }
 
@@ -222,13 +89,13 @@ void appendDefaultScanRoots(std::vector<fs::path>& roots, std::unordered_set<std
     appendScanRoot(roots, seenRoots, env(L"ProgramFiles(x86)"));
 }
 
-void scanFilesRecursive(const fs::path& root, std::vector<Command>& out, std::unordered_set<std::wstring>& seenPaths, int depth, int maxDepth, size_t maxItems)
+void scanFilesRecursive(const fs::path& root, std::vector<Command>& out, std::unordered_set<std::wstring>& seenPaths,
+                        int depth, int maxDepth, size_t maxItems)
 {
     if (depth > maxDepth || out.size() >= maxItems)
     {
         return;
     }
-
     if (depth == 0 && !seenPaths.insert(pathKey(root)).second)
     {
         return;
@@ -460,23 +327,23 @@ void rebuildIndexAsync()
     setStatus(L"Indexing apps and API commands...");
 
     std::thread([] {
+        const Settings settings = getSettingsSnapshot();
+        const ProviderContext ctx{ settings, g_notifyWindow.load() };
+
         std::vector<Command> commands;
         commands.reserve(4096);
-        std::unordered_set<std::wstring> seen;
-        seen.reserve(4096);
 
-        addBuiltins(commands);
-        addSettingsUris(commands);
-
-        const Settings settings = getSettingsSnapshot();
-        if (settings.indexStartMenu)
+        // Every index-time provider contributes to one shared candidate list, and
+        // each entry is stamped with its owner so execute() can route back.
+        for (const auto& provider : ProviderRegistry::instance().all())
         {
-            addShortcutCommands(commands, seen, expandEnv(L"%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs"));
-            addShortcutCommands(commands, seen, expandEnv(L"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs"));
-        }
-        if (settings.indexPathTools)
-        {
-            addPathTools(commands, seen);
+            const size_t before = commands.size();
+            provider->index(ctx, commands);
+            const wchar_t* id = provider->info().id;
+            for (size_t i = before; i < commands.size(); ++i)
+            {
+                commands[i].provider = id;
+            }
         }
 
         const bool everythingSdk = settings.useEverything && g_everything.load();

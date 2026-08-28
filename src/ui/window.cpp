@@ -1,6 +1,8 @@
 #include "window.h"
 
 #include "../app.h"
+#include "../core/clipboard_history.h"
+#include "../core/frecency.h"
 #include "../core/indexer.h"
 #include "../core/search.h"
 #include "../core/settings.h"
@@ -24,6 +26,8 @@ constexpr DWORD kDwmUseImmersiveDarkMode = 20;
 constexpr DWORD kDwmWindowCornerPreference = 33;
 constexpr DWORD kDwmBorderColor = 34;
 constexpr DWORD kDwmCornerRound = 2;
+
+void executeCommand(const Command& command);
 
 COLORREF toColorRef(const D2D1_COLOR_F& color)
 {
@@ -218,18 +222,267 @@ void openPathOrUri(const std::wstring& path)
     }
 }
 
-void runShellCommand(const std::wstring& command)
+bool isUrlLike(const std::wstring& value)
+{
+    const std::wstring lower = lowerCopy(value);
+    return startsWith(lower, L"http://") || startsWith(lower, L"https://") ||
+           startsWith(lower, L"ms-settings:") || startsWith(lower, L"shell:");
+}
+
+bool hasFilesystemArg(const Command& command)
+{
+    if (command.arg.empty() || isUrlLike(command.arg))
+    {
+        return false;
+    }
+    return command.kind == CommandKind::File || command.kind == CommandKind::Folder ||
+           command.kind == CommandKind::App || command.kind == CommandKind::PathTool ||
+           command.kind == CommandKind::Builtin;
+}
+
+std::wstring quoted(const std::wstring& value)
+{
+    return L"\"" + value + L"\"";
+}
+
+void runShellCommandWithVerb(const std::wstring& command, const wchar_t* verb)
 {
     const Settings settings = getSettingsSnapshot();
     if (settings.shellUsesPowerShell)
     {
         const std::wstring params = L"-NoExit -NoProfile -ExecutionPolicy Bypass -Command " + command;
-        ShellExecuteW(nullptr, L"open", L"powershell.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+        ShellExecuteW(nullptr, verb, L"powershell.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
     }
     else
     {
         const std::wstring params = L"/d /k " + command;
-        ShellExecuteW(nullptr, L"open", L"cmd.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+        ShellExecuteW(nullptr, verb, L"cmd.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+    }
+}
+
+bool runAsAdministrator(const Command& command)
+{
+    if (command.kind == CommandKind::Shell)
+    {
+        runShellCommandWithVerb(command.arg, L"runas");
+        return true;
+    }
+    if (!hasFilesystemArg(command))
+    {
+        return false;
+    }
+    ShellExecuteW(nullptr, L"runas", command.arg.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return true;
+}
+
+bool drillIntoSelectedFolder()
+{
+    if (g_app.results.empty())
+    {
+        return false;
+    }
+    clampSelection();
+    const Command& command = g_app.results[static_cast<size_t>(g_app.selected)].command;
+    if (command.kind != CommandKind::Folder || command.arg.empty())
+    {
+        return false;
+    }
+
+    std::wstring path = command.arg;
+    if (!path.empty() && path.back() != L'\\' && path.back() != L'/')
+    {
+        path += L"\\";
+    }
+    g_app.editor.setText(L"f " + path);
+    g_app.selected = 0;
+    refreshResults();
+    return true;
+}
+
+void openContainingFolder(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+    const std::wstring params = L"/select," + quoted(path);
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void openWithDialog(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+    const std::wstring params = L"shell32.dll,OpenAs_RunDLL " + quoted(path);
+    ShellExecuteW(nullptr, L"open", L"rundll32.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void terminateProcessId(DWORD processId)
+{
+    if (processId == 0)
+    {
+        return;
+    }
+    if (HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, processId))
+    {
+        TerminateProcess(process, 1);
+        CloseHandle(process);
+    }
+}
+
+std::wstring baseNameForCommand(const Command& command)
+{
+    if (hasFilesystemArg(command))
+    {
+        return fileNameFromPath(command.arg);
+    }
+    if (!command.title.empty())
+    {
+        return command.title;
+    }
+    return command.arg;
+}
+
+void addAction(std::vector<Result>& rows, ActionKind action, const std::wstring& title,
+               const std::wstring& subtitle, int score)
+{
+    Command command = makeCommand(CommandKind::Action, title, subtitle, L"", 0);
+    command.action = action;
+    command.targetKind = g_app.actionTarget.kind;
+    command.processId = g_app.actionTarget.processId;
+    command.hwnd = g_app.actionTarget.hwnd;
+    rows.push_back(Result{ std::move(command), score });
+}
+
+void leaveActionMenu(bool restoreQuery)
+{
+    g_app.actionMenu = false;
+    g_app.actionTarget = Command{};
+    const std::wstring restore = g_app.actionReturnText;
+    g_app.actionReturnText.clear();
+    if (restoreQuery)
+    {
+        g_app.editor.setText(restore);
+        g_app.selected = 0;
+        refreshResults();
+    }
+    else
+    {
+        invalidate();
+    }
+}
+
+void showActionsForSelected()
+{
+    if (g_app.results.empty())
+    {
+        return;
+    }
+    clampSelection();
+
+    g_app.actionTarget = g_app.results[static_cast<size_t>(g_app.selected)].command;
+    g_app.actionReturnText = g_app.editor.text();
+    g_app.actionMenu = true;
+    g_app.queryMode = QueryMode::Actions;
+    g_app.highlightTerms.clear();
+    g_app.results.clear();
+    g_app.selected = 0;
+    g_app.hovered = -1;
+
+    if (g_app.actionTarget.kind == CommandKind::Process)
+    {
+        addAction(g_app.results, ActionKind::KillProcess, L"Kill process", g_app.actionTarget.subtitle, 30000);
+    }
+    else
+    {
+        addAction(g_app.results, ActionKind::Open, L"Open", g_app.actionTarget.title, 30000);
+    }
+
+    if (g_app.actionTarget.kind == CommandKind::Shell || hasFilesystemArg(g_app.actionTarget))
+    {
+        addAction(g_app.results, ActionKind::RunAsAdministrator, L"Run as administrator",
+                  baseNameForCommand(g_app.actionTarget), 29800);
+    }
+
+    if (hasFilesystemArg(g_app.actionTarget))
+    {
+        addAction(g_app.results, ActionKind::OpenContainingFolder, L"Open containing folder",
+                  g_app.actionTarget.arg, 29700);
+        addAction(g_app.results, ActionKind::CopyPath, L"Copy path",
+                  g_app.actionTarget.arg, 29600);
+        addAction(g_app.results, ActionKind::CopyName, L"Copy name",
+                  baseNameForCommand(g_app.actionTarget), 29500);
+        if (g_app.actionTarget.kind == CommandKind::File)
+        {
+            addAction(g_app.results, ActionKind::OpenWith, L"Open with",
+                      baseNameForCommand(g_app.actionTarget), 29400);
+        }
+    }
+    else if (!g_app.actionTarget.arg.empty())
+    {
+        addAction(g_app.results, ActionKind::CopyPath, L"Copy value", g_app.actionTarget.arg, 29600);
+    }
+
+    positionWindow();
+    invalidate();
+}
+
+bool executeActionCommand(const Command& action)
+{
+    if (action.kind != CommandKind::Action)
+    {
+        return false;
+    }
+
+    const Command target = g_app.actionTarget;
+    switch (action.action)
+    {
+    case ActionKind::Open:
+        leaveActionMenu(false);
+        executeCommand(target);
+        return true;
+    case ActionKind::RunAsAdministrator:
+        recordCommandLaunch(target);
+        runAsAdministrator(target);
+        break;
+    case ActionKind::OpenContainingFolder:
+        openContainingFolder(target.arg);
+        break;
+    case ActionKind::CopyPath:
+        copyTextToClipboard(g_app.hwnd, target.arg);
+        break;
+    case ActionKind::CopyName:
+        copyTextToClipboard(g_app.hwnd, baseNameForCommand(target));
+        break;
+    case ActionKind::OpenWith:
+        openWithDialog(target.arg);
+        break;
+    case ActionKind::KillProcess:
+        terminateProcessId(target.processId);
+        break;
+    default:
+        return false;
+    }
+
+    hidePalette();
+    return true;
+}
+
+void executeSelectedAsAdmin()
+{
+    if (g_app.results.empty() && !g_app.actionMenu)
+    {
+        return;
+    }
+    const Command target = g_app.actionMenu
+        ? g_app.actionTarget
+        : g_app.results[static_cast<size_t>(std::clamp(g_app.selected, 0, static_cast<int>(g_app.results.size()) - 1))].command;
+    if (runAsAdministrator(target))
+    {
+        recordCommandLaunch(target);
+        hidePalette();
     }
 }
 
@@ -241,8 +494,15 @@ void quitApp()
 
 void executeCommand(const Command& command)
 {
+    recordCommandLaunch(command);
+
+    // Kinds that drive the palette itself need the window, so they stay here.
+    // Everything else belongs to the provider that produced it.
     switch (command.kind)
     {
+    case CommandKind::Action:
+        executeActionCommand(command);
+        return;
     case CommandKind::OpenSettings:
         showSettings();
         return;
@@ -253,48 +513,27 @@ void executeCommand(const Command& command)
         refreshResults();
         positionWindow();
         return;
+    case CommandKind::PaletteQuery:
+        g_app.mode = UiMode::Palette;
+        g_app.editor.setText(command.arg);
+        g_app.selected = 0;
+        refreshResults();
+        positionWindow();
+        return;
     case CommandKind::ReloadIndex:
         rebuildIndexAsync();
         return;
     case CommandKind::ExitApp:
         quitApp();
         return;
-    case CommandKind::Shell:
-        runShellCommand(command.arg);
+    default:
         break;
-    case CommandKind::Web:
-        openPathOrUri(L"https://www.google.com/search?q=" + urlEncode(command.arg));
-        break;
-    case CommandKind::Calc:
-        copyTextToClipboard(g_app.hwnd, command.arg);
-        break;
-    case CommandKind::Window:
-        if (IsWindow(command.hwnd))
-        {
-            if (IsIconic(command.hwnd))
-            {
-                ShowWindow(command.hwnd, SW_RESTORE);
-            }
-            SetForegroundWindow(command.hwnd);
-        }
-        break;
-    case CommandKind::Setting:
-    case CommandKind::App:
-    case CommandKind::PathTool:
-    case CommandKind::File:
-    case CommandKind::Folder:
+    }
+
+    if (!executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd))
+    {
+        // Shared default: the command names a path or a URI.
         openPathOrUri(command.arg);
-        break;
-    case CommandKind::Builtin:
-        if (command.arg == L"lock")
-        {
-            LockWorkStation();
-        }
-        else
-        {
-            openPathOrUri(command.arg);
-        }
-        break;
     }
     hidePalette();
 }
@@ -415,6 +654,11 @@ void handlePaletteKey(WPARAM key)
     switch (key)
     {
     case VK_ESCAPE:
+        if (g_app.actionMenu)
+        {
+            leaveActionMenu(true);
+            return;
+        }
         hidePalette();
         return;
     case VK_RETURN:
@@ -449,6 +693,10 @@ void handlePaletteKey(WPARAM key)
         invalidate();
         return;
     case VK_RIGHT:
+        if (!ctrlDown() && !shiftDown() && drillIntoSelectedFolder())
+        {
+            return;
+        }
         g_app.editor.moveRight(ctrlDown(), shiftDown());
         resetCaretBlink();
         invalidate();
@@ -578,6 +826,12 @@ void refreshResults()
         invalidate();
         return;
     }
+    if (g_app.actionMenu)
+    {
+        g_app.actionMenu = false;
+        g_app.actionTarget = Command{};
+        g_app.actionReturnText.clear();
+    }
 
     const Settings settings = getSettingsSnapshot();
     SearchOutput output = runSearch(g_app.editor.text(), settings, g_app.hwnd);
@@ -671,6 +925,9 @@ void showPalette()
 {
     g_app.visible = true;
     g_app.mode = UiMode::Palette;
+    g_app.actionMenu = false;
+    g_app.actionTarget = Command{};
+    g_app.actionReturnText.clear();
     g_app.editor.clear();
     g_app.queryScrollX = 0.0f;
     g_app.selected = 0;
@@ -722,6 +979,9 @@ void hidePalette()
     commitNumberEdit();
     g_app.visible = false;
     g_app.draggingText = false;
+    g_app.actionMenu = false;
+    g_app.actionTarget = Command{};
+    g_app.actionReturnText.clear();
     if (g_app.hwnd)
     {
         KillTimer(g_app.hwnd, kCaretTimerId);
@@ -772,9 +1032,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         applyWindowChrome(hwnd, g_app.theme);
         addTrayIcon(hwnd);
         setIndexNotifyWindow(hwnd);
+        AddClipboardFormatListener(hwnd);
+        captureClipboardHistory(hwnd);
         g_app.icons.start(hwnd);
         RegisterHotKey(hwnd, kHotkeyId, MOD_ALT | MOD_NOREPEAT, L'Q');
         rebuildIndexAsync();
+        return 0;
+
+    case WM_CLIPBOARDUPDATE:
+        captureClipboardHistory(hwnd);
+        if (g_app.visible && g_app.queryMode == QueryMode::Clipboard)
+        {
+            refreshResults();
+        }
         return 0;
 
     case kShowPaletteMessage:
@@ -782,6 +1052,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case kIndexUpdatedMessage:
+    case kAsyncProviderUpdatedMessage:
         if (g_app.visible)
         {
             refreshResults();
@@ -907,6 +1178,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             switch (wParam)
             {
+            case VK_RETURN:
+                if (shiftDown() && g_app.mode == UiMode::Palette)
+                {
+                    executeSelectedAsAdmin();
+                    return 0;
+                }
+                break;
             case VK_OEM_COMMA:
                 showSettings();
                 return 0;
@@ -928,6 +1206,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     g_app.editor.selectAll();
                     resetCaretBlink();
                     invalidate();
+                    return 0;
+                case L'K':
+                    showActionsForSelected();
                     return 0;
                 case L'C':
                     if (g_app.editor.hasSelection())
@@ -1002,6 +1283,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
 
+        if (g_app.actionMenu)
+        {
+            leaveActionMenu(false);
+        }
         g_app.editor.insertChar(ch);
         g_app.selected = 0;
         resetCaretBlink();
@@ -1239,6 +1524,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         KillTimer(hwnd, kCaretTimerId);
         UnregisterHotKey(hwnd, kHotkeyId);
+        RemoveClipboardFormatListener(hwnd);
         g_app.icons.stop();
         g_app.graphics.destroy();
         Shell_NotifyIconW(NIM_DELETE, &g_app.tray);

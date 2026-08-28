@@ -120,6 +120,11 @@ const wchar_t* actionHint(CommandKind kind)
     case CommandKind::ReloadIndex: return L"Reload";
     case CommandKind::ExitApp: return L"Quit";
     case CommandKind::OpenCalculator: return L"Compute";
+    case CommandKind::PaletteQuery: return L"Search";
+    case CommandKind::QuickLink: return L"Open";
+    case CommandKind::Clipboard: return L"Copy";
+    case CommandKind::Process: return L"Kill";
+    case CommandKind::Action: return L"Do";
     default: return L"Open";
     }
 }

@@ -46,6 +46,7 @@ $CompilerArgs = @(
   "-limm32"
   # Everything HTTP API client.
   "-lwinhttp"
+  "-lpsapi"
   "-lole32"
   "-loleaut32"
   "-lshell32"

@@ -1,4 +1,6 @@
 #include "app.h"
+#include "core/frecency.h"
+#include "core/providers/providers.h"
 #include "core/settings.h"
 #include "ui/paint.h"
 #include "ui/window.h"
@@ -22,6 +24,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
     loadSettings();
+    loadFrecency();
+
+    // Must happen before the first index rebuild, which is kicked off in WM_CREATE.
+    registerBuiltinProviders();
 
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"QuickPal.Native.SingleInstance");
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS)

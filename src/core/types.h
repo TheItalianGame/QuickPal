@@ -22,6 +22,7 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kShowPaletteMessage = WM_APP + 2;
 constexpr UINT kIndexUpdatedMessage = WM_APP + 3;
 constexpr UINT kIconReadyMessage = WM_APP + 4;
+constexpr UINT kAsyncProviderUpdatedMessage = WM_APP + 5;
 
 constexpr int kHotkeyId = 7001;
 constexpr int kCaretTimerId = 7101;
@@ -46,6 +47,23 @@ enum class CommandKind
     OpenSettings,
     ReloadIndex,
     ExitApp,
+    PaletteQuery,
+    QuickLink,
+    Clipboard,
+    Process,
+    Action,
+};
+
+enum class ActionKind
+{
+    None,
+    Open,
+    RunAsAdministrator,
+    OpenContainingFolder,
+    CopyPath,
+    CopyName,
+    OpenWith,
+    KillProcess,
 };
 
 struct Command
@@ -55,8 +73,13 @@ struct Command
     std::wstring subtitle;
     std::wstring arg;
     std::wstring searchText;
+    std::wstring key;
+    std::wstring data;
     int weight = 0;
     HWND hwnd = nullptr;
+    DWORD processId = 0;
+    CommandKind targetKind = CommandKind::Builtin;
+    ActionKind action = ActionKind::None;
     // Id of the provider that produced this, stamped automatically when a result is
     // added. Points at a static literal, so copying a Command stays cheap.
     const wchar_t* provider = nullptr;
@@ -74,6 +97,7 @@ enum class QueryMode
     Windows,
     Processes,
     Clipboard,
+    Actions,
 };
 
 struct Result
