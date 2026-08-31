@@ -34,6 +34,8 @@ constexpr int kProviderHotkeyBase = 8000;
 std::vector<std::wstring> g_providerHotkeyIds;
 
 void executeCommand(const Command& command);
+void beginShortcutCapture(const std::wstring& providerId);
+void beginPrefixEdit(const std::wstring& providerId);
 
 COLORREF toColorRef(const D2D1_COLOR_F& color)
 {
@@ -57,6 +59,19 @@ void invalidate()
     if (g_app.hwnd)
     {
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
+    }
+}
+
+void rememberPreviousForeground()
+{
+    if (g_app.visible)
+    {
+        return;
+    }
+    HWND foreground = GetForegroundWindow();
+    if (foreground && foreground != g_app.hwnd)
+    {
+        g_app.previousForeground = foreground;
     }
 }
 
@@ -101,9 +116,9 @@ void registerProviderHotkeys(HWND hwnd)
 
     unregisterProviderHotkeys(hwnd);
     const Settings settings = getSettingsSnapshot();
-    for (const auto& provider : ProviderRegistry::instance().all())
+    for (const auto& entry : ProviderRegistry::instance().entries())
     {
-        const std::wstring providerId = provider->info().id;
+        const std::wstring providerId = entry.info.id;
         const auto it = settings.providerShortcuts.find(providerId);
         if (it == settings.providerShortcuts.end())
         {
@@ -303,9 +318,14 @@ bool isUrlLike(const std::wstring& value)
            startsWith(lower, L"ms-settings:") || startsWith(lower, L"shell:");
 }
 
+bool isInternalArg(const std::wstring& value)
+{
+    return startsWith(lowerCopy(value), L"system:") || startsWith(lowerCopy(value), L"value:");
+}
+
 bool hasFilesystemArg(const Command& command)
 {
-    if (command.arg.empty() || isUrlLike(command.arg))
+    if (command.arg.empty() || isUrlLike(command.arg) || isInternalArg(command.arg))
     {
         return false;
     }
@@ -423,6 +443,34 @@ void terminateProcessId(DWORD processId)
     }
 }
 
+bool parseChromeTabData(const std::wstring& data, int& windowId, int& tabId)
+{
+    const size_t split = data.find(L'\t');
+    if (split == std::wstring::npos)
+    {
+        return false;
+    }
+    windowId = _wtoi(data.substr(0, split).c_str());
+    tabId = _wtoi(data.substr(split + 1).c_str());
+    return windowId > 0 && tabId > 0;
+}
+
+std::wstring providerTitleForId(const wchar_t* id)
+{
+    if (!id || !*id)
+    {
+        return {};
+    }
+    if (Provider* provider = ProviderRegistry::instance().byId(id))
+    {
+        if (const ProviderInfo* info = ProviderRegistry::instance().infoFor(provider))
+        {
+            return info->title;
+        }
+    }
+    return id;
+}
+
 std::wstring baseNameForCommand(const Command& command)
 {
     if (hasFilesystemArg(command))
@@ -434,6 +482,83 @@ std::wstring baseNameForCommand(const Command& command)
         return command.title;
     }
     return command.arg;
+}
+
+bool isPasteableTextCommand(const Command& command)
+{
+    return (command.kind == CommandKind::Clipboard || command.kind == CommandKind::Snippet ||
+            command.kind == CommandKind::Calc) && !command.arg.empty();
+}
+
+void pastePlainTextToPreviousWindow(const std::wstring& text)
+{
+    HWND target = g_app.previousForeground;
+    if (target == g_app.hwnd)
+    {
+        target = nullptr;
+    }
+    ShowWindow(g_app.hwnd, SW_HIDE);
+    pasteTextToWindow(g_app.hwnd, target, text);
+}
+
+void focusWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return;
+    }
+    if (IsIconic(hwnd))
+    {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+    SetForegroundWindow(hwnd);
+}
+
+RECT monitorWorkAreaForWindow(HWND hwnd)
+{
+    RECT fallback{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &fallback, 0);
+
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{ sizeof(info) };
+    return GetMonitorInfoW(monitor, &info) ? info.rcWork : fallback;
+}
+
+void snapWindow(HWND hwnd, bool right)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return;
+    }
+    ShowWindow(hwnd, SW_RESTORE);
+    const RECT work = monitorWorkAreaForWindow(hwnd);
+    const int width = std::max<int>(1, work.right - work.left);
+    const int height = std::max<int>(1, work.bottom - work.top);
+    const int half = std::max(1, width / 2);
+    const int x = right ? work.right - half : work.left;
+    SetWindowPos(hwnd, nullptr, x, work.top, half, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    focusWindow(hwnd);
+}
+
+void centerWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return;
+    }
+    ShowWindow(hwnd, SW_RESTORE);
+    RECT rect{};
+    if (!GetWindowRect(hwnd, &rect))
+    {
+        return;
+    }
+    const RECT work = monitorWorkAreaForWindow(hwnd);
+    const int width = std::min(std::max<int>(1, rect.right - rect.left), std::max<int>(1, work.right - work.left));
+    const int height = std::min(std::max<int>(1, rect.bottom - rect.top), std::max<int>(1, work.bottom - work.top));
+    const int x = work.left + std::max<int>(0, ((work.right - work.left) - width) / 2);
+    const int y = work.top + std::max<int>(0, ((work.bottom - work.top) - height) / 2);
+    SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    focusWindow(hwnd);
 }
 
 void addAction(std::vector<Result>& rows, ActionKind action, const std::wstring& title,
@@ -465,6 +590,46 @@ void leaveActionMenu(bool restoreQuery)
     }
 }
 
+bool selectProviderSettingRow(const std::wstring& providerId, SettingField field)
+{
+    const auto& rows = settingRows();
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+    {
+        if (!rows[static_cast<size_t>(i)].isHeader &&
+            rows[static_cast<size_t>(i)].item.providerId == providerId &&
+            rows[static_cast<size_t>(i)].item.field == field)
+        {
+            g_app.settingsSelected = i;
+            scrollSettingsSelectionIntoView();
+            invalidate();
+            return true;
+        }
+    }
+    return false;
+}
+
+void lockBitwardenSession()
+{
+    Provider* provider = ProviderRegistry::instance().byId(L"bitwarden");
+    if (!provider)
+    {
+        return;
+    }
+    Command command = makeCommand(CommandKind::BitwardenControl, L"Lock Bitwarden", L"", L"lock", 0);
+    command.provider = L"bitwarden";
+    executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground);
+}
+
+void showProviderSettings(const std::wstring& providerId, SettingField field)
+{
+    if (providerId.empty())
+    {
+        return;
+    }
+    showSettings();
+    selectProviderSettingRow(providerId, field);
+}
+
 void showActionsForSelected()
 {
     if (g_app.results.empty())
@@ -491,10 +656,65 @@ void showActionsForSelected()
         addAction(g_app.results, ActionKind::Open, L"Open", g_app.actionTarget.title, 30000);
     }
 
+    if (isPasteableTextCommand(g_app.actionTarget))
+    {
+        addAction(g_app.results, ActionKind::PasteText, L"Paste as plain text",
+                  g_app.actionTarget.title, 29900);
+    }
+
     if (g_app.actionTarget.kind == CommandKind::Shell || hasFilesystemArg(g_app.actionTarget))
     {
         addAction(g_app.results, ActionKind::RunAsAdministrator, L"Run as administrator",
                   baseNameForCommand(g_app.actionTarget), 29800);
+    }
+
+    if (g_app.actionTarget.kind == CommandKind::Window)
+    {
+        addAction(g_app.results, ActionKind::WindowMinimize, L"Minimize window",
+                  g_app.actionTarget.title, 29780);
+        addAction(g_app.results, ActionKind::WindowMaximizeRestore, L"Maximize or restore window",
+                  g_app.actionTarget.title, 29770);
+        addAction(g_app.results, ActionKind::WindowSnapLeft, L"Snap window left",
+                  g_app.actionTarget.title, 29760);
+        addAction(g_app.results, ActionKind::WindowSnapRight, L"Snap window right",
+                  g_app.actionTarget.title, 29750);
+        addAction(g_app.results, ActionKind::WindowCenter, L"Center window",
+                  g_app.actionTarget.title, 29740);
+        addAction(g_app.results, ActionKind::WindowClose, L"Close window",
+                  g_app.actionTarget.title, 29730);
+    }
+
+    int chromeWindowId = 0;
+    int chromeTabId = 0;
+    if (g_app.actionTarget.kind == CommandKind::ChromeTab &&
+        parseChromeTabData(g_app.actionTarget.data, chromeWindowId, chromeTabId))
+    {
+        addAction(g_app.results, ActionKind::ReloadBrowserTab, L"Reload tab",
+                  g_app.actionTarget.title, 29780);
+        addAction(g_app.results, ActionKind::CloseBrowserTab, L"Close tab",
+                  g_app.actionTarget.title, 29770);
+    }
+
+    if (g_app.actionTarget.kind == CommandKind::Clipboard)
+    {
+        const bool pinned = isClipboardTextPinned(g_app.actionTarget.arg);
+        addAction(g_app.results, pinned ? ActionKind::UnpinClipboard : ActionKind::PinClipboard,
+                  pinned ? L"Unpin clipboard item" : L"Pin clipboard item",
+                  g_app.actionTarget.title, 29750);
+    }
+
+    if (g_app.actionTarget.kind == CommandKind::BitwardenItem)
+    {
+        addAction(g_app.results, ActionKind::BitwardenCopyUsername, L"Copy username",
+                  g_app.actionTarget.title, 29790);
+        addAction(g_app.results, ActionKind::BitwardenCopyPassword, L"Copy password",
+                  g_app.actionTarget.title, 29780);
+        addAction(g_app.results, ActionKind::BitwardenCopyTotp, L"Copy TOTP",
+                  g_app.actionTarget.title, 29770);
+        addAction(g_app.results, ActionKind::BitwardenOpenSite, L"Open site",
+                  g_app.actionTarget.arg.empty() ? g_app.actionTarget.title : g_app.actionTarget.arg, 29760);
+        addAction(g_app.results, ActionKind::BitwardenOpenItem, L"Open in Bitwarden",
+                  g_app.actionTarget.title, 29750);
     }
 
     if (hasFilesystemArg(g_app.actionTarget))
@@ -514,6 +734,28 @@ void showActionsForSelected()
     else if (!g_app.actionTarget.arg.empty())
     {
         addAction(g_app.results, ActionKind::CopyPath, L"Copy value", g_app.actionTarget.arg, 29600);
+    }
+
+    if (!g_app.actionTarget.title.empty())
+    {
+        addAction(g_app.results, ActionKind::CopyTitle, L"Copy title",
+                  g_app.actionTarget.title, 29300);
+    }
+    if (!g_app.actionTarget.subtitle.empty())
+    {
+        addAction(g_app.results, ActionKind::CopySubtitle, L"Copy subtitle",
+                  g_app.actionTarget.subtitle, 29200);
+    }
+
+    if (g_app.actionTarget.provider && *g_app.actionTarget.provider)
+    {
+        const std::wstring providerTitle = providerTitleForId(g_app.actionTarget.provider);
+        addAction(g_app.results, ActionKind::ConfigureProvider, L"Open provider settings",
+                  providerTitle, 28900);
+        addAction(g_app.results, ActionKind::SetProviderShortcut, L"Set provider shortcut",
+                  providerTitle, 28800);
+        addAction(g_app.results, ActionKind::SetProviderPrefix, L"Set provider prefix",
+                  providerTitle, 28700);
     }
 
     positionWindow();
@@ -547,12 +789,98 @@ bool executeActionCommand(const Command& action)
     case ActionKind::CopyName:
         copyTextToClipboard(g_app.hwnd, baseNameForCommand(target));
         break;
+    case ActionKind::CopyTitle:
+        copyTextToClipboard(g_app.hwnd, target.title);
+        break;
+    case ActionKind::CopySubtitle:
+        copyTextToClipboard(g_app.hwnd, target.subtitle);
+        break;
     case ActionKind::OpenWith:
         openWithDialog(target.arg);
         break;
     case ActionKind::KillProcess:
         terminateProcessId(target.processId);
         break;
+    case ActionKind::PasteText:
+        pastePlainTextToPreviousWindow(target.arg);
+        break;
+    case ActionKind::PinClipboard:
+        pinClipboardText(target.arg);
+        break;
+    case ActionKind::UnpinClipboard:
+        unpinClipboardText(target.arg);
+        break;
+    case ActionKind::CloseBrowserTab:
+    case ActionKind::ReloadBrowserTab:
+    {
+        int windowId = 0;
+        int tabId = 0;
+        if (parseChromeTabData(target.data, windowId, tabId))
+        {
+            if (action.action == ActionKind::CloseBrowserTab)
+            {
+                closeChromeTab(windowId, tabId);
+            }
+            else
+            {
+                reloadChromeTab(windowId, tabId);
+            }
+        }
+        break;
+    }
+    case ActionKind::WindowMinimize:
+        if (IsWindow(target.hwnd))
+        {
+            ShowWindow(target.hwnd, SW_MINIMIZE);
+        }
+        break;
+    case ActionKind::WindowMaximizeRestore:
+        if (IsWindow(target.hwnd))
+        {
+            ShowWindow(target.hwnd, IsZoomed(target.hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+            focusWindow(target.hwnd);
+        }
+        break;
+    case ActionKind::WindowSnapLeft:
+        snapWindow(target.hwnd, false);
+        break;
+    case ActionKind::WindowSnapRight:
+        snapWindow(target.hwnd, true);
+        break;
+    case ActionKind::WindowCenter:
+        centerWindow(target.hwnd);
+        break;
+    case ActionKind::WindowClose:
+        if (IsWindow(target.hwnd))
+        {
+            PostMessageW(target.hwnd, WM_CLOSE, 0, 0);
+        }
+        break;
+    case ActionKind::BitwardenCopyUsername:
+    case ActionKind::BitwardenCopyPassword:
+    case ActionKind::BitwardenCopyTotp:
+    case ActionKind::BitwardenOpenSite:
+    case ActionKind::BitwardenOpenItem:
+    {
+        Command routed = target;
+        routed.action = action.action;
+        executeThroughProvider(routed, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground);
+        break;
+    }
+    case ActionKind::ConfigureProvider:
+        leaveActionMenu(false);
+        showProviderSettings(target.provider ? target.provider : L"", SettingField::ProviderShortcut);
+        return true;
+    case ActionKind::SetProviderShortcut:
+        leaveActionMenu(false);
+        showProviderSettings(target.provider ? target.provider : L"", SettingField::ProviderShortcut);
+        beginShortcutCapture(target.provider ? target.provider : L"");
+        return true;
+    case ActionKind::SetProviderPrefix:
+        leaveActionMenu(false);
+        showProviderSettings(target.provider ? target.provider : L"", SettingField::ProviderPrefix);
+        beginPrefixEdit(target.provider ? target.provider : L"");
+        return true;
     default:
         return false;
     }
@@ -621,7 +949,13 @@ void executeCommand(const Command& command)
         break;
     }
 
-    if (!executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd))
+    const bool hideBeforeProvider = command.kind == CommandKind::Clipboard || command.kind == CommandKind::Snippet;
+    if (hideBeforeProvider)
+    {
+        ShowWindow(g_app.hwnd, SW_HIDE);
+    }
+
+    if (!executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground))
     {
         // Shared default: the command names a path or a URI.
         openPathOrUri(command.arg);
@@ -855,6 +1189,22 @@ void applySettingAt(int rowIndex, int direction)
     {
         openChromeExtensionInstallLocation();
         setTransientStatus(L"Opened Chrome extension folder and chrome://extensions.");
+        invalidate();
+        return;
+    }
+    if (field == SettingField::ProviderAction)
+    {
+        if (Provider* provider = ProviderRegistry::instance().byId(item.providerId.c_str()))
+        {
+            const ProviderContext ctx{ getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground };
+            if (provider->applySetting(ctx, item))
+            {
+                setTransientStatus(L"Opened " + item.title + L".");
+                invalidate();
+                return;
+            }
+        }
+        setTransientStatus(L"Provider action unavailable.");
         invalidate();
         return;
     }
@@ -1220,6 +1570,7 @@ void positionWindow()
 
 void showPalette()
 {
+    rememberPreviousForeground();
     g_app.visible = true;
     g_app.mode = UiMode::Palette;
     g_app.actionMenu = false;
@@ -1248,6 +1599,7 @@ void showPalette()
 
 void showProviderPalette(const std::wstring& providerId)
 {
+    rememberPreviousForeground();
     g_app.visible = true;
     g_app.mode = UiMode::Palette;
     g_app.actionMenu = false;
@@ -1276,6 +1628,7 @@ void showProviderPalette(const std::wstring& providerId)
 
 void showSettings()
 {
+    rememberPreviousForeground();
     g_app.visible = true;
     g_app.mode = UiMode::Settings;
     g_app.forcedProviderId.clear();
@@ -1400,6 +1753,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             invalidate();
         }
         return 0;
+
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMSUSPEND && getSettingsSnapshot().bitwardenLockOnSleep)
+        {
+            lockBitwardenSession();
+        }
+        return TRUE;
 
     case WM_HOTKEY:
         if (wParam == kHotkeyId)
@@ -1920,6 +2280,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_DESTROY:
+        if (getSettingsSnapshot().bitwardenLockOnExit)
+        {
+            lockBitwardenSession();
+        }
         KillTimer(hwnd, kCaretTimerId);
         UnregisterHotKey(hwnd, kHotkeyId);
         unregisterProviderHotkeys(hwnd);

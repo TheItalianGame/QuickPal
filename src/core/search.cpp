@@ -8,9 +8,9 @@
 
 namespace
 {
-void runProvider(Provider* provider, const ProviderContext& ctx, const Query& query, ResultSink& sink)
+void runProvider(Provider* provider, const ProviderInfo& info, const ProviderContext& ctx, const Query& query, ResultSink& sink)
 {
-    sink.setCurrentProvider(provider->info().id);
+    sink.setCurrentProvider(info.id);
     provider->query(ctx, query, sink);
     sink.setCurrentProvider(nullptr);
 }
@@ -103,25 +103,25 @@ SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, H
 
     Provider* matched = nullptr;
     const Query query = parseQuery(rawQuery, settings, &matched);
+    const ProviderInfo* matchedInfo = registry.infoFor(matched);
 
     ResultSink sink(settings.maxResults);
 
-    if (matched && query.hasPrefix())
+    if (matched && matchedInfo && query.hasPrefix())
     {
         // A focused mode owns the whole result list.
-        const ProviderInfo info = matched->info();
-        out.mode = info.mode;
+        out.mode = matchedInfo->mode;
         out.highlightTerms = query.bodyTerms;
-        runProvider(matched, ctx, query, sink);
-        scanStaticIndexForProvider(info, query.bodyTerms, sink);
+        runProvider(matched, *matchedInfo, ctx, query, sink);
+        scanStaticIndexForProvider(*matchedInfo, query.bodyTerms, sink);
     }
     else
     {
-        if (matched)
+        if (matched && matchedInfo)
         {
-            out.mode = matched->info().mode;
+            out.mode = matchedInfo->mode;
             out.highlightTerms = query.bodyTerms;
-            runProvider(matched, ctx, query, sink);
+            runProvider(matched, *matchedInfo, ctx, query, sink);
         }
         else
         {
@@ -129,19 +129,19 @@ SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, H
         }
 
         const Query bare = withoutPrefix(query);
-        for (const auto& provider : registry.all())
+        for (const auto& entry : registry.entries())
         {
-            if (provider.get() == matched || !provider->info().runsUnprefixed)
+            if (entry.provider == matched || !entry.info.runsUnprefixed)
             {
                 continue;
             }
             const int before = sink.size();
-            runProvider(provider.get(), ctx, bare, sink);
+            runProvider(entry.provider, entry.info, ctx, bare, sink);
             // Only claim the header pill if this provider actually contributed and
             // nothing more specific already did.
             if (sink.size() != before && out.mode == QueryMode::Commands)
             {
-                out.mode = provider->info().mode;
+                out.mode = entry.info.mode;
             }
         }
 
@@ -160,7 +160,7 @@ SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, H
         {
             out.mode = QueryMode::Actions;
         }
-        addFallbackActions(query, matched ? matched->info().id : nullptr, sink);
+        addFallbackActions(query, matchedInfo ? matchedInfo->id : nullptr, sink);
     }
 
     out.results = sink.take();
@@ -172,14 +172,14 @@ SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, H
     return out;
 }
 
-bool executeThroughProvider(const Command& command, const Settings& settings, HWND self)
+bool executeThroughProvider(const Command& command, const Settings& settings, HWND self, HWND previousWindow)
 {
     Provider* provider = ProviderRegistry::instance().byId(command.provider);
     if (!provider)
     {
         return false;
     }
-    const ProviderContext ctx{ settings, self };
+    const ProviderContext ctx{ settings, self, previousWindow };
     return provider->execute(ctx, command);
 }
 
@@ -193,22 +193,27 @@ SearchOutput runProviderSearch(const std::wstring& rawQuery, const wchar_t* prov
     QueryPerformanceCounter(&start);
 
     SearchOutput out;
-    Provider* provider = ProviderRegistry::instance().byId(providerId);
+    ProviderRegistry& registry = ProviderRegistry::instance();
+    Provider* provider = registry.byId(providerId);
     if (!provider)
     {
         return runSearch(rawQuery, settings, self);
     }
 
     const ProviderContext ctx{ settings, self };
-    const ProviderInfo info = provider->info();
-    const Query query = makeScopedQuery(rawQuery, info);
+    const ProviderInfo* info = registry.infoFor(provider);
+    if (!info)
+    {
+        return runSearch(rawQuery, settings, self);
+    }
+    const Query query = makeScopedQuery(rawQuery, *info);
     ResultSink sink(settings.maxResults);
 
-    out.mode = info.mode;
+    out.mode = info->mode;
     out.highlightTerms = query.terms;
-    runProvider(provider, ctx, query, sink);
+    runProvider(provider, *info, ctx, query, sink);
 
-    scanStaticIndexForProvider(info, query.terms, sink);
+    scanStaticIndexForProvider(*info, query.terms, sink);
 
     out.results = sink.take();
 

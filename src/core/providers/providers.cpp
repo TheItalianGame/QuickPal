@@ -16,9 +16,12 @@ void registerBuiltinProviders()
     registry.add(makeAppsFolderProvider());
     registry.add(makePathToolsProvider());
     registry.add(makeQuickLinksProvider());
+    registry.add(makeSnippetsProvider());
+    registry.add(makeValuesProvider());
 
     // Query-time providers: compute results from the query itself.
     registry.add(makeFilesProvider());
+    registry.add(makeBitwardenProvider());
     registry.add(makeWindowsProvider());
     registry.add(makeShellProvider());
     registry.add(makeWebProvider());

@@ -27,6 +27,7 @@ enum class PressedPart
 struct AppState
 {
     HWND hwnd = nullptr;
+    HWND previousForeground = nullptr;
     UINT dpi = 96;
     bool visible = false;
     UiMode mode = UiMode::Palette;

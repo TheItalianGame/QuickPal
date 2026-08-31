@@ -3,10 +3,12 @@
 #include "score.h"
 #include "types.h"
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
 
+struct SettingItem;
 struct SettingRow;
 
 // ---------------------------------------------------------------------------
@@ -65,6 +67,7 @@ struct ProviderContext
 {
     const Settings& settings;
     HWND window = nullptr;   // the palette window, for self-exclusion and clipboard ownership
+    HWND previousWindow = nullptr;
 };
 
 // Collects results, keeps them ordered, and enforces the max-results bound so
@@ -72,7 +75,10 @@ struct ProviderContext
 class ResultSink
 {
 public:
-    explicit ResultSink(int limit) : limit_(limit < 1 ? 1 : limit) {}
+    explicit ResultSink(int limit) : limit_(limit < 1 ? 1 : limit)
+    {
+        results_.reserve(static_cast<std::size_t>(limit_) + 1);
+    }
 
     // Add with an explicit score. Negative scores are dropped.
     void add(Command command, int score);
@@ -140,6 +146,16 @@ public:
     // Optional provider-owned settings rows. Providers that expose toggles,
     // install actions, or a preferred shortcut append their section here.
     virtual void settings(const ProviderContext&, std::vector<SettingRow>&) {}
+
+    // Optional provider-owned setting action. Lets a provider surface a native
+    // settings row without centralizing every provider detail in window.cpp.
+    virtual bool applySetting(const ProviderContext&, const SettingItem&) { return false; }
+};
+
+struct RegisteredProvider
+{
+    Provider* provider = nullptr;
+    ProviderInfo info;
 };
 
 class ProviderRegistry
@@ -149,6 +165,8 @@ public:
 
     void add(std::unique_ptr<Provider> provider);
     const std::vector<std::unique_ptr<Provider>>& all() const { return providers_; }
+    const std::vector<RegisteredProvider>& entries() const { return entries_; }
+    const ProviderInfo* infoFor(const Provider* provider) const;
 
     // Longest matching prefix wins, so "file " beats "f " on "file report".
     Provider* matchPrefix(const std::wstring& raw, const std::wstring& lower,
@@ -157,6 +175,7 @@ public:
 
 private:
     std::vector<std::unique_ptr<Provider>> providers_;
+    std::vector<RegisteredProvider> entries_;
 };
 
 // Builds a Query, resolving which provider's effective prefix (if any) claimed it.

@@ -155,6 +155,71 @@ std::wstring readyStatus()
     }
     return status.str();
 }
+
+std::vector<Command> buildStaticCommands(const Settings& settings)
+{
+    const ProviderContext ctx{ settings, g_notifyWindow.load() };
+    std::vector<Command> commands;
+    commands.reserve(4096);
+
+    for (const auto& entry : ProviderRegistry::instance().entries())
+    {
+        const size_t before = commands.size();
+        entry.provider->index(ctx, commands);
+        for (size_t i = before; i < commands.size(); ++i)
+        {
+            commands[i].provider = entry.info.id;
+        }
+    }
+    return commands;
+}
+
+std::vector<Command> buildFallbackFileCommands(const Settings& settings)
+{
+    std::vector<Command> files;
+    if (!settings.fallbackFileIndex)
+    {
+        return files;
+    }
+
+    files.reserve(static_cast<size_t>(std::min(settings.fileLimit, 50000)));
+
+    const std::wstring profile = env(L"USERPROFILE");
+    std::vector<fs::path> roots;
+    std::unordered_set<std::wstring> seenRoots;
+    seenRoots.reserve(32);
+    if (!profile.empty())
+    {
+        if (settings.indexDesktop)
+        {
+            appendScanRoot(roots, seenRoots, profile + L"\\Desktop");
+        }
+        if (settings.indexDocuments)
+        {
+            appendScanRoot(roots, seenRoots, profile + L"\\Documents");
+        }
+        if (settings.indexDownloads)
+        {
+            appendScanRoot(roots, seenRoots, profile + L"\\Downloads");
+        }
+    }
+    if (settings.indexDefaultPaths)
+    {
+        appendDefaultScanRoots(roots, seenRoots);
+    }
+
+    std::unordered_set<std::wstring> seenPaths;
+    seenPaths.reserve(static_cast<size_t>(std::min(settings.fileLimit * 2, 250000)));
+    for (const auto& root : roots)
+    {
+        std::error_code ec;
+        if (fs::exists(root, ec))
+        {
+            scanFilesRecursive(root, files, seenPaths, 0, settings.fileDepth, static_cast<size_t>(settings.fileLimit));
+        }
+    }
+    return files;
+}
 }
 
 void setIndexNotifyWindow(HWND hwnd)
@@ -339,11 +404,11 @@ void rebuildIndexAsync()
 
         // Every index-time provider contributes to one shared candidate list, and
         // each entry is stamped with its owner so execute() can route back.
-        for (const auto& provider : ProviderRegistry::instance().all())
+        for (const auto& entry : ProviderRegistry::instance().entries())
         {
             const size_t before = commands.size();
-            provider->index(ctx, commands);
-            const wchar_t* id = provider->info().id;
+            entry.provider->index(ctx, commands);
+            const wchar_t* id = entry.info.id;
             for (size_t i = before; i < commands.size(); ++i)
             {
                 commands[i].provider = id;
@@ -385,4 +450,52 @@ void rebuildIndexAsync()
             setStatus(status.str());
         }
     }).detach();
+}
+
+void rebuildIndexBlocking(bool includeFallbackFileIndex)
+{
+    bool expected = false;
+    while (!g_rebuilding.compare_exchange_weak(expected, true))
+    {
+        expected = false;
+        Sleep(5);
+    }
+
+    setStatus(L"Benchmark indexing commands...");
+
+    const Settings settings = getSettingsSnapshot();
+    std::vector<Command> commands = buildStaticCommands(settings);
+
+    const bool everythingSdk = settings.useEverything && g_everything.load();
+    const bool everythingHttp = settings.useEverythingHttp &&
+        g_everythingHttp.search(everythingHttpSettingsFrom(settings), L"", 1).ok;
+    g_everythingReady = everythingSdk;
+    g_everythingHttpReady = everythingHttp;
+
+    {
+        std::unique_lock<std::shared_mutex> lock(g_indexMutex);
+        g_staticIndex = std::move(commands);
+        g_staticCount = static_cast<int>(g_staticIndex.size());
+    }
+
+    if (includeFallbackFileIndex && !everythingSdk && !everythingHttp && settings.fallbackFileIndex)
+    {
+        g_fileIndexing = true;
+        std::vector<Command> files = buildFallbackFileCommands(settings);
+        {
+            std::unique_lock<std::shared_mutex> lock(g_indexMutex);
+            g_fileIndex = std::move(files);
+            g_fileCount = static_cast<int>(g_fileIndex.size());
+        }
+        g_fileIndexing = false;
+    }
+    else if (!includeFallbackFileIndex)
+    {
+        std::unique_lock<std::shared_mutex> lock(g_indexMutex);
+        g_fileIndex.clear();
+        g_fileCount = 0;
+    }
+
+    g_rebuilding = false;
+    setStatus(readyStatus());
 }

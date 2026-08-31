@@ -27,4 +27,4 @@ SearchOutput runProviderSearch(const std::wstring& rawQuery, const wchar_t* prov
 
 // Hands a command back to the provider that produced it. Returns false when no
 // provider claims it, so the caller can apply the shared open-with-shell default.
-bool executeThroughProvider(const Command& command, const Settings& settings, HWND self);
+bool executeThroughProvider(const Command& command, const Settings& settings, HWND self, HWND previousWindow = nullptr);

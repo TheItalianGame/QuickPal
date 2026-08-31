@@ -12,6 +12,7 @@ void setIndexNotifyWindow(HWND hwnd);
 
 void rebuildIndexAsync();
 void buildFileIndexAsync();
+void rebuildIndexBlocking(bool includeFallbackFileIndex = false);
 
 // Status has two layers: a stable base written by the indexers, and a transient
 // line the search path overlays with per-keystroke timing.

@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <mutex>
 #include <sstream>
 
@@ -85,6 +86,20 @@ std::wstring replaceQuery(std::wstring templ, const std::wstring& query)
     return templ;
 }
 
+std::wstring primaryPrefix(const ProviderInfo& info, const Settings& settings)
+{
+    const std::vector<std::wstring> prefixes = effectiveProviderPrefixes(info, settings);
+    return prefixes.empty() ? L"ql" : prefixes.front();
+}
+
+Command makeQuickLinkPrompt(const QuickLink& link, const std::wstring& prefix, int rank)
+{
+    Command command = makeCommand(CommandKind::PaletteQuery, link.alias + L" quicklink",
+                                  link.url, prefix + L" " + link.alias + L" ", 3800 - rank);
+    command.searchText += L" quicklink alias url";
+    return command;
+}
+
 class QuickLinksProvider : public Provider
 {
 public:
@@ -93,42 +108,55 @@ public:
         ProviderInfo info;
         info.id = L"quicklinks";
         info.title = L"Quicklinks";
+        info.prefixes = { L"ql", L"link" };
+        info.mode = QueryMode::Web;
+        info.exclusive = true;
         info.runsUnprefixed = true;
         return info;
     }
 
-    void index(const ProviderContext&, std::vector<Command>& out) override
+    void index(const ProviderContext& ctx, std::vector<Command>& out) override
     {
         refresh();
+        const std::wstring prefix = primaryPrefix(info(), ctx.settings);
+        int rank = 0;
         for (const auto& link : linksSnapshot())
         {
-            Command command = makeCommand(CommandKind::QuickLink, link.alias + L" quicklink",
-                                          link.url, link.alias, 3600);
-            command.searchText += L" quicklink alias url";
-            out.push_back(std::move(command));
+            out.push_back(makeQuickLinkPrompt(link, prefix, rank++));
         }
     }
 
-    void query(const ProviderContext&, const Query& q, ResultSink& sink) override
+    void query(const ProviderContext& ctx, const Query& q, ResultSink& sink) override
     {
-        if (q.terms.size() < 2)
+        const auto links = linksSnapshot();
+        const std::wstring subject = q.subject();
+        const std::wstring subjectLower = q.subjectLower();
+        const auto terms = q.subjectTerms();
+        const std::wstring prefix = primaryPrefix(info(), ctx.settings);
+
+        if (q.hasPrefix() && terms.empty())
         {
             return;
         }
 
-        const std::wstring alias = q.terms.front();
-        const size_t firstSpace = q.raw.find_first_of(L" \t");
+        if (terms.size() < 2)
+        {
+            return;
+        }
+
+        const std::wstring alias = terms.front();
+        const size_t firstSpace = subject.find_first_of(L" \t");
         if (firstSpace == std::wstring::npos)
         {
             return;
         }
-        const std::wstring body = trimCopy(q.raw.substr(firstSpace + 1));
+        const std::wstring body = trimCopy(subject.substr(firstSpace + 1));
         if (body.empty())
         {
             return;
         }
 
-        for (const auto& link : linksSnapshot())
+        for (const auto& link : links)
         {
             if (link.alias != alias)
             {
@@ -136,6 +164,7 @@ public:
             }
             Command command = makeCommand(CommandKind::QuickLink, L"Open " + alias, body, replaceQuery(link.url, body), 9200);
             command.data = link.url;
+            command.searchText += L" " + subjectLower + L" quicklink";
             sink.add(std::move(command), 24500);
             return;
         }
@@ -158,6 +187,19 @@ public:
                                       L"Shortcut", L"Open quicklink aliases directly", info().id));
         out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
                                       L"Prefix", L"Typed alias for quicklink-only search", info().id));
+        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
+                                      L"Edit quicklinks", L"Open quicklinks.ini", info().id, L"open-file"));
+    }
+
+    bool applySetting(const ProviderContext&, const SettingItem& item) override
+    {
+        if (item.field != SettingField::ProviderAction || item.settingKey != L"open-file")
+        {
+            return false;
+        }
+        ensureDefaults();
+        ShellExecuteW(nullptr, L"open", quickLinksPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return true;
     }
 
 private:

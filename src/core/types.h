@@ -53,6 +53,10 @@ enum class CommandKind
     Clipboard,
     Process,
     ChromeTab,
+    Snippet,
+    ValueTool,
+    BitwardenItem,
+    BitwardenControl,
     Action,
 };
 
@@ -64,8 +68,29 @@ enum class ActionKind
     OpenContainingFolder,
     CopyPath,
     CopyName,
+    CopyTitle,
+    CopySubtitle,
     OpenWith,
     KillProcess,
+    PasteText,
+    PinClipboard,
+    UnpinClipboard,
+    CloseBrowserTab,
+    ReloadBrowserTab,
+    WindowMinimize,
+    WindowMaximizeRestore,
+    WindowSnapLeft,
+    WindowSnapRight,
+    WindowCenter,
+    WindowClose,
+    BitwardenCopyUsername,
+    BitwardenCopyPassword,
+    BitwardenCopyTotp,
+    BitwardenOpenSite,
+    BitwardenOpenItem,
+    ConfigureProvider,
+    SetProviderShortcut,
+    SetProviderPrefix,
 };
 
 struct Command
@@ -100,6 +125,9 @@ enum class QueryMode
     Processes,
     Clipboard,
     BrowserTabs,
+    Snippets,
+    Values,
+    Bitwarden,
     Actions,
 };
 
@@ -141,11 +169,19 @@ struct Settings
     bool showLatency = true;
     bool shellUsesPowerShell = true;
     bool useChromeTabs = true;
+    bool bitwardenSearchUsernames = true;
+    bool bitwardenUnlockWithPin = true;
+    bool bitwardenRequireMasterOnRestart = true;
+    bool bitwardenUseServe = false;
+    bool bitwardenLockOnSleep = true;
+    bool bitwardenLockOnExit = true;
     bool useSystemAccent = true;
     Appearance appearance = Appearance::System;
     int maxResults = kDefaultMaxResults;
     int fileDepth = 5;
     int fileLimit = 50000;
+    int bitwardenSecretTimeoutSeconds = 300;
+    int bitwardenClipboardClearSeconds = 30;
 
     // Everything's local HTTP server; defaults are imported from Everything.ini
     // when it exists, so this usually needs no configuration.

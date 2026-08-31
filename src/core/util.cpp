@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <chrono>
 #include <filesystem>
 #include <sstream>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -152,6 +154,22 @@ std::string toUtf8(const std::wstring& value)
     return result;
 }
 
+std::wstring fromUtf8(const std::string& value)
+{
+    if (value.empty())
+    {
+        return {};
+    }
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (needed <= 0)
+    {
+        return {};
+    }
+    std::wstring result(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), needed);
+    return result;
+}
+
 std::wstring urlEncode(const std::wstring& value)
 {
     static constexpr char hex[] = "0123456789ABCDEF";
@@ -206,6 +224,176 @@ bool copyTextToClipboard(HWND owner, const std::wstring& text)
     return true;
 }
 
+UINT clipboardFormatExcludeMonitor()
+{
+    static const UINT format = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+    return format;
+}
+
+UINT clipboardFormatIncludeHistory()
+{
+    static const UINT format = RegisterClipboardFormatW(L"CanIncludeInClipboardHistory");
+    return format;
+}
+
+UINT clipboardFormatUploadCloud()
+{
+    static const UINT format = RegisterClipboardFormatW(L"CanUploadToCloudClipboard");
+    return format;
+}
+
+bool setClipboardDword(UINT format, DWORD value)
+{
+    if (format == 0)
+    {
+        return false;
+    }
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+    if (!mem)
+    {
+        return false;
+    }
+    if (void* data = GlobalLock(mem))
+    {
+        *static_cast<DWORD*>(data) = value;
+        GlobalUnlock(mem);
+        SetClipboardData(format, mem);
+        return true;
+    }
+    GlobalFree(mem);
+    return false;
+}
+
+bool setClipboardMarker(UINT format)
+{
+    if (format == 0)
+    {
+        return false;
+    }
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+    if (!mem)
+    {
+        return false;
+    }
+    if (void* data = GlobalLock(mem))
+    {
+        *static_cast<DWORD*>(data) = 0;
+        GlobalUnlock(mem);
+        SetClipboardData(format, mem);
+        return true;
+    }
+    GlobalFree(mem);
+    return false;
+}
+
+uint64_t textFingerprint(const std::wstring& text)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (wchar_t ch : text)
+    {
+        const auto value = static_cast<unsigned int>(ch);
+        hash ^= static_cast<unsigned char>(value & 0xFF);
+        hash *= 1099511628211ULL;
+        hash ^= static_cast<unsigned char>((value >> 8) & 0xFF);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+bool copySensitiveTextToClipboard(HWND owner, const std::wstring& text, int clearAfterSeconds)
+{
+    if (!OpenClipboard(owner))
+    {
+        return false;
+    }
+    EmptyClipboard();
+
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!mem)
+    {
+        CloseClipboard();
+        return false;
+    }
+
+    if (void* data = GlobalLock(mem))
+    {
+        memcpy(data, text.c_str(), bytes);
+        GlobalUnlock(mem);
+        SetClipboardData(CF_UNICODETEXT, mem);
+    }
+    else
+    {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+
+    setClipboardMarker(clipboardFormatExcludeMonitor());
+    setClipboardDword(clipboardFormatIncludeHistory(), 0);
+    setClipboardDword(clipboardFormatUploadCloud(), 0);
+    CloseClipboard();
+
+    if (clearAfterSeconds > 0)
+    {
+        const size_t expectedLength = text.size();
+        const uint64_t expectedFingerprint = textFingerprint(text);
+        const int delay = std::clamp(clearAfterSeconds, 1, 3600);
+        std::thread([owner, expectedLength, expectedFingerprint, delay] {
+            std::this_thread::sleep_for(std::chrono::seconds(delay));
+            const auto current = clipboardText(owner);
+            if (!current || current->size() != expectedLength || textFingerprint(*current) != expectedFingerprint)
+            {
+                return;
+            }
+            if (OpenClipboard(owner))
+            {
+                EmptyClipboard();
+                CloseClipboard();
+            }
+        }).detach();
+    }
+
+    return true;
+}
+
+bool clipboardHasHistoryExclusion()
+{
+    if (IsClipboardFormatAvailable(clipboardFormatExcludeMonitor()))
+    {
+        return true;
+    }
+
+    bool excluded = false;
+    if (!OpenClipboard(nullptr))
+    {
+        return false;
+    }
+
+    auto dwordZero = [](UINT format) {
+        if (!format || !IsClipboardFormatAvailable(format))
+        {
+            return false;
+        }
+        HANDLE handle = GetClipboardData(format);
+        if (!handle)
+        {
+            return false;
+        }
+        const DWORD* value = static_cast<const DWORD*>(GlobalLock(handle));
+        const bool zero = value && *value == 0;
+        if (value)
+        {
+            GlobalUnlock(handle);
+        }
+        return zero;
+    };
+
+    excluded = dwordZero(clipboardFormatIncludeHistory()) || dwordZero(clipboardFormatUploadCloud());
+    CloseClipboard();
+    return excluded;
+}
+
 std::optional<std::wstring> clipboardText(HWND owner)
 {
     if (!OpenClipboard(owner))
@@ -223,6 +411,39 @@ std::optional<std::wstring> clipboardText(HWND owner)
     }
     CloseClipboard();
     return result;
+}
+
+bool pasteTextToWindow(HWND owner, HWND target, const std::wstring& text)
+{
+    if (!copyTextToClipboard(owner, text))
+    {
+        return false;
+    }
+    if (!target || !IsWindow(target))
+    {
+        return true;
+    }
+
+    if (IsIconic(target))
+    {
+        ShowWindow(target, SW_RESTORE);
+    }
+    SetForegroundWindow(target);
+    Sleep(35);
+
+    INPUT input[4]{};
+    input[0].type = INPUT_KEYBOARD;
+    input[0].ki.wVk = VK_CONTROL;
+    input[1].type = INPUT_KEYBOARD;
+    input[1].ki.wVk = L'V';
+    input[2].type = INPUT_KEYBOARD;
+    input[2].ki.wVk = L'V';
+    input[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    input[3].type = INPUT_KEYBOARD;
+    input[3].ki.wVk = VK_CONTROL;
+    input[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(4, input, sizeof(INPUT));
+    return true;
 }
 
 Command makeCommand(CommandKind kind, std::wstring title, std::wstring subtitle, std::wstring arg, int weight)

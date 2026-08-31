@@ -42,12 +42,18 @@ public:
         }
 
         int rank = 0;
-        for (const auto& text : history)
+        for (const auto& entry : history)
         {
-            Command command = makeCommand(CommandKind::Clipboard, titleForClipboard(text),
-                                          L"Clipboard item - Enter copies it", text, 5200 - rank);
-            const int score = terms.empty() ? 18000 - rank : scoreCommandTerms(terms, command) + 14000;
-            sink.add(std::move(command), score);
+            Command command = makeCommand(CommandKind::Clipboard, titleForClipboard(entry.text),
+                                          entry.pinned ? L"Pinned clipboard item - Enter pastes it"
+                                                       : L"Clipboard item - Enter pastes it",
+                                          entry.text, 5400 - rank);
+            command.data = entry.pinned ? L"pinned" : L"";
+            const int base = terms.empty() ? command.weight : scoreCommandTerms(terms, command);
+            if (base >= 0)
+            {
+                sink.add(std::move(command), base + 14000 - rank);
+            }
             ++rank;
         }
     }
@@ -58,7 +64,7 @@ public:
         {
             return false;
         }
-        copyTextToClipboard(ctx.window, command.arg);
+        pasteTextToWindow(ctx.window, ctx.previousWindow, command.arg);
         return true;
     }
 

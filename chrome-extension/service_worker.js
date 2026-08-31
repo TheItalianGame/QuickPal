@@ -66,6 +66,28 @@ async function activateTab(message) {
   }
 }
 
+async function closeTab(message) {
+  if (!Number.isInteger(message.tabId)) {
+    return;
+  }
+  try {
+    await chrome.tabs.remove(message.tabId);
+  } finally {
+    queueSnapshot();
+  }
+}
+
+async function reloadTab(message) {
+  if (!Number.isInteger(message.tabId)) {
+    return;
+  }
+  try {
+    await chrome.tabs.reload(message.tabId);
+  } finally {
+    queueSnapshot();
+  }
+}
+
 function connect() {
   try {
     port = chrome.runtime.connectNative(HOST);
@@ -78,6 +100,10 @@ function connect() {
   port.onMessage.addListener((message) => {
     if (message && message.type === "activate") {
       activateTab(message);
+    } else if (message && message.type === "close") {
+      closeTab(message);
+    } else if (message && message.type === "reload") {
+      reloadTab(message);
     }
   });
 

@@ -7,6 +7,7 @@ New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 
 $Res = Join-Path $Bin "QuickPal.res"
 $Exe = Join-Path $Bin "QuickPal.exe"
+$BenchExe = Join-Path $Bin "QuickPalBench.exe"
 $NativeHostExe = Join-Path $Bin "QuickPalChromeHost.exe"
 $ExtensionDir = Join-Path $Root "chrome-extension"
 $ExtensionZip = Join-Path $Bin "QuickPalChromeTabsExtension.zip"
@@ -22,12 +23,20 @@ Get-Process -Name QuickPalChromeHost -ErrorAction SilentlyContinue | ForEach-Obj
   $_.Kill()
   $_.WaitForExit(5000) | Out-Null
 }
+Get-Process -Name QuickPalBench -ErrorAction SilentlyContinue | ForEach-Object {
+  Write-Host "Stopping running QuickPalBench (pid $($_.Id))"
+  $_.Kill()
+  $_.WaitForExit(5000) | Out-Null
+}
 
 & windres (Join-Path $Src "QuickPal.rc") -O coff -o $Res
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $Sources = Get-ChildItem -Path $Src -Recurse -Filter *.cpp |
-  Where-Object { $_.FullName -notlike (Join-Path $Src "native_host\*") } |
+  Where-Object {
+    $_.FullName -notlike (Join-Path $Src "native_host\*") -and
+    $_.FullName -notlike (Join-Path $Src "bench\*")
+  } |
   Sort-Object FullName |
   ForEach-Object { $_.FullName }
 Write-Host ("Compiling {0} translation units" -f $Sources.Count)
@@ -66,12 +75,58 @@ $CompilerArgs = @(
   "-lgdi32"
   "-luser32"
   "-ladvapi32"
+  "-lcrypt32"
+  "-lbcrypt"
 )
 
 & g++ @CompilerArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "Built $Exe"
+
+$BenchSources = Get-ChildItem -Path (Join-Path $Src "core") -Recurse -Filter *.cpp |
+  Sort-Object FullName |
+  ForEach-Object { $_.FullName }
+$BenchSources += Join-Path $Src "bench\search_bench.cpp"
+Write-Host ("Compiling benchmark with {0} translation units" -f $BenchSources.Count)
+
+$BenchArgs = @(
+  "-std=c++20"
+  "-O2"
+  "-DNDEBUG"
+  "-DUNICODE"
+  "-D_UNICODE"
+  "-static"
+  "-static-libgcc"
+  "-static-libstdc++"
+) + $BenchSources + @(
+  "-o"
+  $BenchExe
+  "-lwinhttp"
+  "-luuid"
+  "-lpsapi"
+  "-lole32"
+  "-loleaut32"
+  "-lshell32"
+  "-lshlwapi"
+  "-lcomctl32"
+  "-lgdi32"
+  "-luser32"
+  "-ladvapi32"
+  "-lcrypt32"
+  "-lbcrypt"
+)
+
+& g++ @BenchArgs
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "Built $BenchExe"
+
+Get-Process -Name QuickPalChromeHost -ErrorAction SilentlyContinue | ForEach-Object {
+  Write-Host "Stopping running QuickPalChromeHost before relink (pid $($_.Id))"
+  $_.Kill()
+  $_.WaitForExit(5000) | Out-Null
+}
 
 $NativeHostSource = Join-Path $Src "native_host\chrome_tabs_host.cpp"
 $NativeHostArgs = @(

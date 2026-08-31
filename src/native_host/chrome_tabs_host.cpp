@@ -88,10 +88,10 @@ void sendNativeMessage(const std::string& json)
     std::fflush(stdout);
 }
 
-void sendActivate(int windowId, int tabId)
+void sendTabCommand(const std::string& action, int windowId, int tabId)
 {
     std::ostringstream json;
-    json << "{\"type\":\"activate\",\"windowId\":" << windowId << ",\"tabId\":" << tabId << "}";
+    json << "{\"type\":\"" << action << "\",\"windowId\":" << windowId << ",\"tabId\":" << tabId << "}";
     sendNativeMessage(json.str());
 }
 
@@ -105,7 +105,7 @@ void handlePipeRequest(const std::string& request)
     std::getline(stream, windowText, '\t');
     std::getline(stream, tabText, '\n');
 
-    if (action != "activate")
+    if (action != "activate" && action != "close" && action != "reload")
     {
         return;
     }
@@ -114,7 +114,7 @@ void handlePipeRequest(const std::string& request)
     const int tabId = std::atoi(tabText.c_str());
     if (windowId > 0 && tabId > 0)
     {
-        sendActivate(windowId, tabId);
+        sendTabCommand(action, windowId, tabId);
     }
 }
 

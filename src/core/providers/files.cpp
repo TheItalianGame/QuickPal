@@ -4,6 +4,7 @@
 #include "../settings.h"
 #include "../util.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -20,8 +21,7 @@ namespace
 {
 Command makeFileCommand(const FileResultEntry& entry, int weight)
 {
-    const DWORD attributes = GetFileAttributesW(entry.path.c_str());
-    const bool folder = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+    const bool folder = entry.hasType && entry.isFolder;
     Command command = makeCommand(folder ? CommandKind::Folder : CommandKind::File,
                                   fileNameFromPath(entry.path), fileEntrySubtitle(entry), entry.path, weight);
     command.data = entry.path;
@@ -48,7 +48,24 @@ std::wstring expandPathQuery(std::wstring query)
     return expandEnv(query);
 }
 
-bool addPathBrowseResults(const std::wstring& query, ResultSink& sink)
+struct PathBrowseEntry
+{
+    FileResultEntry file;
+    std::wstring name;
+    std::wstring lowerName;
+    bool folder = false;
+};
+
+struct PathBrowseSnapshot
+{
+    bool handled = false;
+    bool pending = false;
+    bool ready = false;
+    std::wstring directory;
+    std::vector<FileResultEntry> entries;
+};
+
+bool resolvePathBrowseQuery(const std::wstring& query, fs::path& directory, std::wstring& filter)
 {
     if (!isPathQuery(query))
     {
@@ -57,9 +74,6 @@ bool addPathBrowseResults(const std::wstring& query, ResultSink& sink)
 
     std::error_code ec;
     fs::path path(expandPathQuery(query));
-    fs::path directory;
-    std::wstring filter;
-
     if (fs::exists(path, ec) && fs::is_directory(path, ec))
     {
         directory = path;
@@ -70,55 +84,185 @@ bool addPathBrowseResults(const std::wstring& query, ResultSink& sink)
         filter = lowerCopy(path.filename().wstring());
     }
 
-    if (directory.empty() || !fs::exists(directory, ec) || !fs::is_directory(directory, ec))
-    {
-        return true;
-    }
+    return true;
+}
 
-    struct Entry
-    {
-        fs::path path;
-        bool folder = false;
-    };
-    std::vector<Entry> entries;
-    entries.reserve(static_cast<size_t>(sink.limit()));
+std::vector<PathBrowseEntry> enumeratePathBrowseDirectory(const std::wstring& directory)
+{
+    std::vector<PathBrowseEntry> entries;
+    entries.reserve(256);
 
+    std::error_code ec;
     fs::directory_iterator it(directory, fs::directory_options::skip_permission_denied, ec);
     const fs::directory_iterator end;
     for (; it != end && !ec; it.increment(ec))
     {
-        const std::wstring name = it->path().filename().wstring();
-        if (!filter.empty() && !startsWith(lowerCopy(name), filter))
-        {
-            continue;
-        }
-        entries.push_back(Entry{ it->path(), it->is_directory(ec) });
+        const std::wstring path = it->path().wstring();
+        FileResultEntry file = fileEntryFromPath(path);
+        std::wstring name = fileNameFromPath(path);
+
+        PathBrowseEntry entry;
+        entry.folder = file.hasType && file.isFolder;
+        entry.file = std::move(file);
+        entry.name = std::move(name);
+        entry.lowerName = lowerCopy(entry.name);
+        entries.push_back(std::move(entry));
     }
 
-    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+    std::sort(entries.begin(), entries.end(), [](const PathBrowseEntry& a, const PathBrowseEntry& b) {
         if (a.folder != b.folder)
         {
             return a.folder;
         }
-        return lowerCopy(a.path.filename().wstring()) < lowerCopy(b.path.filename().wstring());
+        return a.lowerName < b.lowerName;
     });
+    return entries;
+}
 
-    int rank = 0;
+std::vector<FileResultEntry> selectPathBrowseEntries(const std::vector<PathBrowseEntry>& entries,
+                                                     const std::wstring& filter,
+                                                     int limit)
+{
+    std::vector<FileResultEntry> selected;
+    selected.reserve(static_cast<size_t>(limit));
     for (const auto& entry : entries)
     {
-        if (rank >= sink.limit())
+        if (!filter.empty() && !startsWith(entry.lowerName, filter))
+        {
+            continue;
+        }
+        selected.push_back(entry.file);
+        if (static_cast<int>(selected.size()) >= limit)
         {
             break;
         }
-        const FileResultEntry file = fileEntryFromPath(entry.path.wstring());
-        Command command = makeCommand(entry.folder ? CommandKind::Folder : CommandKind::File,
-                                      fileNameFromPath(file.path), fileEntrySubtitle(file), file.path, 7200 - rank);
-        command.data = file.path;
-        sink.add(std::move(command), 18000 - rank);
-        ++rank;
     }
-    return true;
+    return selected;
 }
+
+class PathBrowseCache
+{
+public:
+    ~PathBrowseCache()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (worker_.joinable())
+        {
+            worker_.join();
+        }
+    }
+
+    PathBrowseSnapshot query(const ProviderContext& ctx, const std::wstring& text, int limit)
+    {
+        fs::path directoryPath;
+        std::wstring filter;
+        PathBrowseSnapshot snapshot;
+        if (!resolvePathBrowseQuery(text, directoryPath, filter))
+        {
+            return snapshot;
+        }
+
+        snapshot.handled = true;
+        std::error_code ec;
+        if (directoryPath.empty() || !fs::exists(directoryPath, ec) || !fs::is_directory(directoryPath, ec))
+        {
+            snapshot.ready = true;
+            return snapshot;
+        }
+
+        ensureWorker();
+
+        const std::wstring directory = directoryPath.wstring();
+        const std::wstring key = lowerCopy(directory);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            snapshot.directory = directory;
+            if (key == completedKey_)
+            {
+                snapshot.ready = true;
+                snapshot.entries = selectPathBrowseEntries(completed_, filter, limit);
+                return snapshot;
+            }
+
+            if (key != requestedKey_)
+            {
+                requestedKey_ = key;
+                requestedDirectory_ = directory;
+                notify_ = ctx.window;
+                ++generation_;
+                cv_.notify_one();
+            }
+
+            snapshot.pending = true;
+            return snapshot;
+        }
+    }
+
+private:
+    void ensureWorker()
+    {
+        bool expected = false;
+        if (started_.compare_exchange_strong(expected, true))
+        {
+            worker_ = std::thread([this] { workerLoop(); });
+        }
+    }
+
+    void workerLoop()
+    {
+        for (;;)
+        {
+            uint64_t generation = 0;
+            std::wstring directory;
+            HWND notify = nullptr;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this] { return stop_ || generation_ != runningGeneration_; });
+                if (stop_)
+                {
+                    break;
+                }
+                runningGeneration_ = generation_;
+                generation = runningGeneration_;
+                directory = requestedDirectory_;
+                notify = notify_;
+            }
+
+            std::vector<PathBrowseEntry> fresh = enumeratePathBrowseDirectory(directory);
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (stop_ || generation != generation_)
+                {
+                    continue;
+                }
+                completedKey_ = requestedKey_;
+                completed_ = std::move(fresh);
+            }
+            if (notify)
+            {
+                PostMessageW(notify, kAsyncProviderUpdatedMessage, 0, 0);
+            }
+        }
+    }
+
+    std::atomic_bool started_{ false };
+    std::thread worker_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+    uint64_t generation_ = 0;
+    uint64_t runningGeneration_ = 0;
+    std::wstring requestedKey_;
+    std::wstring requestedDirectory_;
+    HWND notify_ = nullptr;
+    std::wstring completedKey_;
+    std::vector<PathBrowseEntry> completed_;
+};
 
 struct AsyncSnapshot
 {
@@ -308,8 +452,24 @@ public:
             return;
         }
 
-        if (addPathBrowseResults(fileQuery, sink))
+        const PathBrowseSnapshot browse = pathBrowse_.query(ctx, fileQuery, sink.limit());
+        if (browse.handled)
         {
+            if (browse.ready)
+            {
+                int rank = 0;
+                for (const auto& entry : browse.entries)
+                {
+                    sink.add(makeFileCommand(entry, 7200 - rank), 18000 - rank);
+                    ++rank;
+                }
+                return;
+            }
+            if (browse.pending)
+            {
+                sink.add(makeCommand(CommandKind::Folder, L"Opening folder", browse.directory, browse.directory, 0), 8500);
+                return;
+            }
             return;
         }
 
@@ -379,6 +539,7 @@ public:
     }
 
 private:
+    PathBrowseCache pathBrowse_;
     AsyncEverythingSearch async_;
 };
 }

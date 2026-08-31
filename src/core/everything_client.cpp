@@ -299,6 +299,54 @@ std::optional<ULONGLONG> parseUnsigned64(const std::wstring& text)
     }
 }
 
+std::wstring lowerJsonText(std::wstring text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return text;
+}
+
+std::optional<bool> parseBoolish(const std::wstring& text)
+{
+    const std::wstring lower = lowerJsonText(text);
+    if (lower == L"1" || lower == L"true" || lower == L"yes" || lower == L"folder" || lower == L"directory")
+    {
+        return true;
+    }
+    if (lower == L"0" || lower == L"false" || lower == L"no" || lower == L"file")
+    {
+        return false;
+    }
+    return std::nullopt;
+}
+
+void applyEntryTypeFromJson(FileResultEntry& entry, const std::wstring& object)
+{
+    constexpr const wchar_t* boolKeys[] = { L"folder", L"is_folder", L"isfolder" };
+    for (const wchar_t* key : boolKeys)
+    {
+        if (auto value = jsonValueText(object, key))
+        {
+            if (auto folder = parseBoolish(*value))
+            {
+                entry.hasType = true;
+                entry.isFolder = *folder;
+                return;
+            }
+        }
+    }
+
+    if (auto type = jsonValueText(object, L"type"))
+    {
+        if (auto folder = parseBoolish(*type))
+        {
+            entry.hasType = true;
+            entry.isFolder = *folder;
+        }
+    }
+}
+
 std::wstring pathFromEverythingObject(const std::wstring& object)
 {
     if (auto direct = jsonValueText(object, L"full_path"))
@@ -352,12 +400,17 @@ std::vector<FileResultEntry> parseEverythingHttpResults(const std::wstring& json
         entry.path = pathFromEverythingObject(object);
         if (!entry.path.empty())
         {
+            applyEntryTypeFromJson(entry, object);
             if (auto size = jsonValueText(object, L"size"))
             {
                 if (auto bytes = parseUnsigned64(*size))
                 {
                     entry.sizeText = formatFileSize(*bytes);
                 }
+            }
+            if (entry.hasType && entry.isFolder && entry.sizeText.empty())
+            {
+                entry.sizeText = L"<DIR>";
             }
             if (auto modified = jsonValueText(object, L"date_modified"))
             {
@@ -434,6 +487,8 @@ FileResultEntry fileEntryFromPath(const std::wstring& path)
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
     {
+        entry.hasType = true;
+        entry.isFolder = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
         {
             entry.sizeText = L"<DIR>";
@@ -501,6 +556,7 @@ bool EverythingSdkClient::load()
         getFullPath_ = reinterpret_cast<GetFullPathFn>(GetProcAddress(module_, "Everything_GetResultFullPathNameW"));
         getSize_ = reinterpret_cast<GetSizeFn>(GetProcAddress(module_, "Everything_GetResultSize"));
         getDateModified_ = reinterpret_cast<GetDateModifiedFn>(GetProcAddress(module_, "Everything_GetResultDateModified"));
+        isFolderResult_ = reinterpret_cast<IsFolderResultFn>(GetProcAddress(module_, "Everything_IsFolderResult"));
 
         loaded_ = setSearch_ && setRequestFlags_ && setMax_ && query_ && getNumResults_ && getFullPath_ && getSize_ && getDateModified_;
         if (loaded_)
@@ -559,9 +615,18 @@ std::vector<FileResultEntry> EverythingSdkClient::search(const std::wstring& que
 
         FileResultEntry entry;
         entry.path = buffer;
+        if (isFolderResult_)
+        {
+            entry.hasType = true;
+            entry.isFolder = isFolderResult_(i) != FALSE;
+        }
 
         LARGE_INTEGER size{};
-        if (getSize_(i, &size))
+        if (entry.hasType && entry.isFolder)
+        {
+            entry.sizeText = L"<DIR>";
+        }
+        else if (getSize_(i, &size))
         {
             entry.sizeText = formatFileSize(static_cast<ULONGLONG>(size.QuadPart));
         }
@@ -683,7 +748,7 @@ EverythingHttpSearchResult EverythingHttpClient::search(const EverythingHttpSett
     WinHttpCloseHandle(request);
     WinHttpCloseHandle(connect);
 
-    result.entries = parseEverythingHttpResults(fromUtf8(body));
+    result.entries = parseEverythingHttpResults(::fromUtf8(body));
     result.ok = true;
     skipUntilMs_ = 0;
     return result;

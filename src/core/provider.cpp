@@ -73,8 +73,28 @@ void ProviderRegistry::add(std::unique_ptr<Provider> provider)
 {
     if (provider)
     {
+        RegisteredProvider entry;
+        entry.provider = provider.get();
+        entry.info = provider->info();
         providers_.push_back(std::move(provider));
+        entries_.push_back(std::move(entry));
     }
+}
+
+const ProviderInfo* ProviderRegistry::infoFor(const Provider* provider) const
+{
+    if (!provider)
+    {
+        return nullptr;
+    }
+    for (const auto& entry : entries_)
+    {
+        if (entry.provider == provider)
+        {
+            return &entry.info;
+        }
+    }
+    return nullptr;
 }
 
 Provider* ProviderRegistry::byId(const wchar_t* id) const
@@ -83,11 +103,11 @@ Provider* ProviderRegistry::byId(const wchar_t* id) const
     {
         return nullptr;
     }
-    for (const auto& provider : providers_)
+    for (const auto& entry : entries_)
     {
-        if (wcscmp(provider->info().id, id) == 0)
+        if (wcscmp(entry.info.id, id) == 0)
         {
-            return provider.get();
+            return entry.provider;
         }
     }
     return nullptr;
@@ -99,9 +119,9 @@ Provider* ProviderRegistry::matchPrefix(const std::wstring& raw, const std::wstr
     Provider* best = nullptr;
     size_t bestLength = 0;
 
-    for (const auto& provider : providers_)
+    for (const auto& entry : entries_)
     {
-        for (const auto& prefix : effectiveProviderPrefixes(provider->info(), settings))
+        for (const auto& prefix : effectiveProviderPrefixes(entry.info, settings))
         {
             if (prefix.empty())
             {
@@ -122,7 +142,7 @@ Provider* ProviderRegistry::matchPrefix(const std::wstring& raw, const std::wstr
 
             if (matches && prefix.size() > bestLength)
             {
-                best = provider.get();
+                best = entry.provider;
                 bestLength = prefix.size();
                 outPrefix = prefix;
             }
@@ -221,6 +241,9 @@ const wchar_t* queryModeLabel(QueryMode mode)
     case QueryMode::Processes: return L"PROCESSES";
     case QueryMode::Clipboard: return L"CLIPBOARD";
     case QueryMode::BrowserTabs: return L"TABS";
+    case QueryMode::Snippets: return L"SNIPPETS";
+    case QueryMode::Values: return L"VALUES";
+    case QueryMode::Bitwarden: return L"BITWARDEN";
     case QueryMode::Actions: return L"ACTIONS";
     default: return nullptr;
     }

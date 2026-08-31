@@ -318,7 +318,7 @@ void openChromeExtensionInstallLocation()
 std::vector<ChromeTabInfo> readChromeTabsCache()
 {
     std::vector<ChromeTabInfo> tabs;
-    const std::wstring json = fromUtf8(readFileBytes(chromeTabsCachePath()));
+    const std::wstring json = ::fromUtf8(readFileBytes(chromeTabsCachePath()));
     const size_t tabsPos = json.find(L"\"tabs\"");
     if (tabsPos == std::wstring::npos)
     {
@@ -352,7 +352,7 @@ std::vector<ChromeTabInfo> readChromeTabsCache()
     return tabs;
 }
 
-bool activateChromeTab(int windowId, int tabId)
+bool sendChromeTabCommand(const wchar_t* action, int windowId, int tabId)
 {
     HANDLE pipe = CreateFileW(kPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (pipe == INVALID_HANDLE_VALUE)
@@ -360,7 +360,8 @@ bool activateChromeTab(int windowId, int tabId)
         return false;
     }
 
-    const std::wstring wide = L"activate\t" + std::to_wstring(windowId) + L"\t" + std::to_wstring(tabId) + L"\n";
+    const std::wstring wide = std::wstring(action) + L"\t" +
+        std::to_wstring(windowId) + L"\t" + std::to_wstring(tabId) + L"\n";
     const std::string message = toUtf8(wide);
     DWORD written = 0;
     const BOOL ok = WriteFile(pipe, message.data(), static_cast<DWORD>(message.size()), &written, nullptr);
@@ -368,3 +369,17 @@ bool activateChromeTab(int windowId, int tabId)
     return ok && written == message.size();
 }
 
+bool activateChromeTab(int windowId, int tabId)
+{
+    return sendChromeTabCommand(L"activate", windowId, tabId);
+}
+
+bool closeChromeTab(int windowId, int tabId)
+{
+    return sendChromeTabCommand(L"close", windowId, tabId);
+}
+
+bool reloadChromeTab(int windowId, int tabId)
+{
+    return sendChromeTabCommand(L"reload", windowId, tabId);
+}

@@ -24,4 +24,5 @@ std::wstring chromeTabsCachePath();
 void openChromeExtensionInstallLocation();
 std::vector<ChromeTabInfo> readChromeTabsCache();
 bool activateChromeTab(int windowId, int tabId);
-
+bool closeChromeTab(int windowId, int tabId);
+bool reloadChromeTab(int windowId, int tabId);

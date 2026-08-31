@@ -19,6 +19,8 @@ struct FileResultEntry
     std::wstring path;
     std::wstring sizeText;
     std::wstring modifiedText;
+    bool hasType = false;
+    bool isFolder = false;
 };
 
 struct EverythingHttpSettings
@@ -58,6 +60,7 @@ private:
     using GetFullPathFn = DWORD(WINAPI*)(DWORD, LPWSTR, DWORD);
     using GetSizeFn = BOOL(WINAPI*)(DWORD, LARGE_INTEGER*);
     using GetDateModifiedFn = BOOL(WINAPI*)(DWORD, FILETIME*);
+    using IsFolderResultFn = BOOL(WINAPI*)(DWORD);
 
     HMODULE module_ = nullptr;
     bool attempted_ = false;
@@ -71,6 +74,7 @@ private:
     GetFullPathFn getFullPath_ = nullptr;
     GetSizeFn getSize_ = nullptr;
     GetDateModifiedFn getDateModified_ = nullptr;
+    IsFolderResultFn isFolderResult_ = nullptr;
 };
 
 class EverythingHttpClient

@@ -204,6 +204,7 @@ void drawKindGlyph(ID2D1RenderTarget* rt, Graphics& gfx, GlyphCache& cache, Comm
         break;
 
     case CommandKind::File:
+    case CommandKind::Snippet:
         strokeGeometry(rt, cache.document.get(), brush, s);
         rt->DrawLine(D2D1::Point2F(13.5f, 2.5f), D2D1::Point2F(13.5f, 7.5f), brush, s);
         rt->DrawLine(D2D1::Point2F(13.5f, 7.5f), D2D1::Point2F(18.5f, 7.5f), brush, s);
@@ -228,6 +229,7 @@ void drawKindGlyph(ID2D1RenderTarget* rt, Graphics& gfx, GlyphCache& cache, Comm
         break;
 
     case CommandKind::Calc:
+    case CommandKind::ValueTool:
         rt->DrawLine(D2D1::Point2F(6.5f, 9.5f), D2D1::Point2F(17.5f, 9.5f), brush, s);
         rt->DrawLine(D2D1::Point2F(6.5f, 14.5f), D2D1::Point2F(17.5f, 14.5f), brush, s);
         break;

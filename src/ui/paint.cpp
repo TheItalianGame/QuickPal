@@ -122,9 +122,11 @@ const wchar_t* actionHint(CommandKind kind)
     case CommandKind::OpenCalculator: return L"Compute";
     case CommandKind::PaletteQuery: return L"Search";
     case CommandKind::QuickLink: return L"Open";
-    case CommandKind::Clipboard: return L"Copy";
+    case CommandKind::Clipboard: return L"Paste";
     case CommandKind::Process: return L"Kill";
     case CommandKind::ChromeTab: return L"Focus";
+    case CommandKind::Snippet: return L"Paste";
+    case CommandKind::ValueTool: return L"Copy";
     case CommandKind::Action: return L"Do";
     default: return L"Open";
     }

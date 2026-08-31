@@ -3,17 +3,34 @@
 #include "../settings.h"
 #include "../util.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace
 {
+constexpr ULONGLONG kWindowRefreshIntervalMs = 120;
+
+struct WindowEntry
+{
+    HWND hwnd = nullptr;
+    std::wstring title;
+    std::wstring processName;
+    std::wstring searchText;
+    int zOrder = 0;
+};
+
 struct EnumContext
 {
-    const std::vector<std::wstring>* terms;
     HWND self;
-    ResultSink* sink;
-    bool focusedMode = false;
+    std::vector<WindowEntry>* entries;
     std::unordered_map<DWORD, std::wstring> processNames;
+    int zOrder = 0;
 };
 
 std::wstring processNameForWindow(EnumContext& ctx, HWND hwnd)
@@ -75,30 +92,114 @@ BOOL CALLBACK enumProc(HWND hwnd, LPARAM lParam)
     }
 
     const std::wstring processName = processNameForWindow(*ctx, hwnd);
-    std::wstring subtitle = L"Open window";
+    WindowEntry entry;
+    entry.hwnd = hwnd;
+    entry.title = std::move(title);
+    entry.processName = processName;
+    entry.zOrder = ctx->zOrder++;
+    entry.searchText = lowerCopy(entry.title);
     if (!processName.empty())
     {
-        subtitle += L" - " + processName;
+        entry.searchText += L" " + lowerCopy(processName) + L" " + lowerCopy(stripExtension(processName));
     }
-
-    Command command = makeCommand(CommandKind::Window, title, subtitle, title, 5600);
-    if (!processName.empty())
-    {
-        command.searchText += L" " + lowerCopy(processName) + L" " + lowerCopy(stripExtension(processName));
-    }
-    command.hwnd = hwnd;
-
-    const int score = scoreCommandTerms(*ctx->terms, command);
-    if (score >= 0)
-    {
-        // Bare queries should prefer a matching live window over launching a
-        // second copy of the same app. The focused "win" mode gets an even
-        // larger boost because it owns the whole result list.
-        const int boost = ctx->focusedMode ? 22000 : 19000;
-        ctx->sink->add(std::move(command), score + boost);
-    }
+    ctx->entries->push_back(std::move(entry));
     return TRUE;
 }
+
+std::vector<WindowEntry> enumerateWindows(HWND self)
+{
+    std::vector<WindowEntry> entries;
+    entries.reserve(64);
+
+    EnumContext enumCtx{ self, &entries };
+    EnumWindows(enumProc, reinterpret_cast<LPARAM>(&enumCtx));
+    return entries;
+}
+
+class WindowSnapshotCache
+{
+public:
+    ~WindowSnapshotCache()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (worker_.joinable())
+        {
+            worker_.join();
+        }
+    }
+
+    std::vector<WindowEntry> snapshot(HWND self)
+    {
+        ensureWorker();
+
+        const ULONGLONG now = GetTickCount64();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            requestedSelf_ = self;
+            if (!refreshPending_ && now >= nextRefreshMs_)
+            {
+                refreshPending_ = true;
+                nextRefreshMs_ = now + kWindowRefreshIntervalMs;
+                cv_.notify_one();
+            }
+            return snapshot_;
+        }
+    }
+
+private:
+    void ensureWorker()
+    {
+        bool expected = false;
+        if (started_.compare_exchange_strong(expected, true))
+        {
+            worker_ = std::thread([this] { workerLoop(); });
+        }
+    }
+
+    void workerLoop()
+    {
+        for (;;)
+        {
+            HWND self = nullptr;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this] { return stop_ || refreshPending_; });
+                if (stop_)
+                {
+                    break;
+                }
+                self = requestedSelf_;
+                refreshPending_ = false;
+            }
+
+            std::vector<WindowEntry> fresh = enumerateWindows(self);
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                snapshot_ = std::move(fresh);
+            }
+
+            if (self)
+            {
+                PostMessageW(self, kAsyncProviderUpdatedMessage, 0, 0);
+            }
+        }
+    }
+
+    std::atomic_bool started_{ false };
+    std::thread worker_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+    bool refreshPending_ = false;
+    HWND requestedSelf_ = nullptr;
+    ULONGLONG nextRefreshMs_ = 0;
+    std::vector<WindowEntry> snapshot_;
+};
 
 class WindowsProvider : public Provider
 {
@@ -123,8 +224,43 @@ public:
             return;
         }
 
-        EnumContext enumCtx{ &terms, ctx.window, &sink, q.hasPrefix() };
-        EnumWindows(enumProc, reinterpret_cast<LPARAM>(&enumCtx));
+        const std::vector<WindowEntry> windows = cache_.snapshot(ctx.window);
+        if (q.hasPrefix() && windows.empty())
+        {
+            sink.add(makeCommand(CommandKind::Window, L"Window list is warming up",
+                                 L"Live windows will appear in a moment", L"", 0), 6000);
+            return;
+        }
+
+        int rank = 0;
+        for (const WindowEntry& window : windows)
+        {
+            if (!IsWindow(window.hwnd) || !IsWindowVisible(window.hwnd) || window.hwnd == ctx.window)
+            {
+                continue;
+            }
+
+            std::wstring subtitle = L"Open window";
+            if (!window.processName.empty())
+            {
+                subtitle += L" - " + window.processName;
+            }
+
+            Command command = makeCommand(CommandKind::Window, window.title, subtitle, window.title,
+                                          5600 - std::min(rank, 500));
+            command.searchText = window.searchText;
+            command.hwnd = window.hwnd;
+
+            const int score = terms.empty() ? command.weight : scoreCommandTerms(terms, command);
+            if (score >= 0)
+            {
+                // EnumWindows is z-ordered, so earlier cached entries are the
+                // closest thing to "most recent" without tracking foreground hooks.
+                const int boost = q.hasPrefix() ? 22000 : 19000;
+                sink.add(std::move(command), score + boost - std::min(rank, 500));
+            }
+            ++rank;
+        }
     }
 
     bool execute(const ProviderContext&, const Command& command) override
@@ -149,6 +285,9 @@ public:
         out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
                                       L"Prefix", L"Typed alias for window-only search", info().id));
     }
+
+private:
+    WindowSnapshotCache cache_;
 };
 }
 

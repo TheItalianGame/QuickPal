@@ -20,9 +20,13 @@ std::wstring stripExtension(std::wstring name);
 std::wstring extensionLower(const std::wstring& path);
 
 std::string toUtf8(const std::wstring& value);
+std::wstring fromUtf8(const std::string& value);
 std::wstring urlEncode(const std::wstring& value);
 
 bool copyTextToClipboard(HWND owner, const std::wstring& text);
+bool copySensitiveTextToClipboard(HWND owner, const std::wstring& text, int clearAfterSeconds);
+bool clipboardHasHistoryExclusion();
 std::optional<std::wstring> clipboardText(HWND owner);
+bool pasteTextToWindow(HWND owner, HWND target, const std::wstring& text);
 
 Command makeCommand(CommandKind kind, std::wstring title, std::wstring subtitle, std::wstring arg, int weight);
