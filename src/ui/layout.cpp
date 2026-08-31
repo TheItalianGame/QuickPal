@@ -78,23 +78,37 @@ PaletteLayout computePaletteLayout(float width, float height, int rowCount, bool
     return layout;
 }
 
-SettingsLayout computeSettingsLayout(float width, float height, const std::vector<SettingRow>& rows, float scrollY)
+SettingsLayout computeSettingsLayout(float width, float height, const std::vector<SettingRow>& rows,
+                                     float scrollY, int sectionCount)
 {
     SettingsLayout layout;
     layout.width = width;
     layout.height = height;
 
-    layout.header = rect(0.0f, 0.0f, width, metrics::settingsHeaderHeight);
-    layout.titleText = rect(metrics::textMargin, 18.0f, width - metrics::textMargin, 46.0f);
-    layout.subtitleText = rect(metrics::textMargin, 46.0f, width - metrics::textMargin, 66.0f);
-    layout.divider = rect(0.0f, metrics::settingsHeaderHeight, width, metrics::settingsHeaderHeight + 1.0f);
+    const float railRight = std::min(metrics::settingsRailWidth, std::max(0.0f, width - 520.0f));
+
+    layout.header = rect(railRight, 0.0f, width, metrics::settingsHeaderHeight);
+    layout.titleText = rect(railRight + metrics::textMargin, 18.0f, width - metrics::textMargin, 46.0f);
+    layout.subtitleText = rect(railRight + metrics::textMargin, 46.0f, width - metrics::textMargin, 66.0f);
+    layout.divider = rect(railRight, metrics::settingsHeaderHeight, width, metrics::settingsHeaderHeight + 1.0f);
 
     const float footerTop = height - metrics::footerHeight;
     layout.footer = rect(0.0f, footerTop, width, height);
-    layout.statusText = rect(metrics::textMargin, footerTop, width - 220.0f, height);
-    layout.footerHint = rect(width - 220.0f, footerTop, width - metrics::textMargin, height);
+    layout.statusText = rect(railRight + metrics::textMargin, footerTop, width - 360.0f, height);
+    layout.footerHint = rect(width - 390.0f, footerTop, width - metrics::textMargin, height);
 
-    layout.listArea = rect(0.0f, metrics::settingsListTop, width, footerTop - 6.0f);
+    layout.listArea = rect(railRight, metrics::settingsListTop, width, footerTop - 6.0f);
+    layout.rail = rect(0.0f, 0.0f, railRight, footerTop);
+    layout.railDivider = rect(railRight, 0.0f, railRight + 1.0f, footerTop);
+    layout.railTitle = rect(14.0f, 18.0f, railRight - 12.0f, 42.0f);
+    layout.railRows.reserve(static_cast<size_t>(std::max(sectionCount, 0)));
+    float railY = 50.0f;
+    for (int i = 0; i < sectionCount; ++i)
+    {
+        layout.railRows.push_back(rect(8.0f, railY, railRight - 8.0f,
+                                       railY + metrics::settingsRailRowHeight));
+        railY += metrics::settingsRailRowHeight;
+    }
 
     float content = 6.0f;
     for (const auto& row : rows)
@@ -129,7 +143,8 @@ SettingsLayout computeSettingsLayout(float width, float height, const std::vecto
         const float rowH = settingsRowHeight(row);
         SettingsRowRects r;
         r.isHeader = row.isHeader;
-        r.row = rect(metrics::sideMargin, y, width - metrics::sideMargin - (layout.showScrollbar ? 8.0f : 0.0f), y + rowH);
+        r.row = rect(railRight + metrics::sideMargin, y,
+                     width - metrics::sideMargin - (layout.showScrollbar ? 8.0f : 0.0f), y + rowH);
 
         if (row.isHeader)
         {
@@ -174,8 +189,10 @@ SettingsLayout computeSettingsLayout(float width, float height, const std::vecto
             }
             case SettingKind::Action:
             {
-                const float width = (row.item.field == SettingField::ProviderShortcut ||
-                                     row.item.field == SettingField::ProviderPrefix) ? 132.0f : 92.0f;
+                const bool wideValue = row.item.settingKey == L"account-email";
+                const float width = wideValue ? metrics::settingsControlWidth :
+                    ((row.item.field == SettingField::ProviderShortcut ||
+                      row.item.field == SettingField::ProviderPrefix) ? 132.0f : 92.0f);
                 r.action = rect(r.control.right - width, cy - 15.0f, r.control.right, cy + 15.0f);
                 break;
             }

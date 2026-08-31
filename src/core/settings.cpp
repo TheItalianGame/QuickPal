@@ -16,6 +16,7 @@ Settings g_settings;
 constexpr int kFileLimitLadder[] = { 1000, 2500, 5000, 10000, 20000, 35000, 50000, 75000, 100000, 150000 };
 
 constexpr const wchar_t* kAppearanceChoices[] = { L"System", L"Dark", L"Light" };
+constexpr const wchar_t* kWindowPositionChoices[] = { L"Center", L"Upper" };
 }
 
 std::wstring settingsDirectory()
@@ -106,7 +107,7 @@ Settings normalizedSettings(Settings settings)
     settings.fileDepth = std::clamp(settings.fileDepth, 1, 8);
     settings.fileLimit = std::clamp(settings.fileLimit, 1000, 150000);
     settings.everythingHttpPort = std::clamp(settings.everythingHttpPort, 1, 65535);
-    settings.bitwardenSecretTimeoutSeconds = std::clamp(settings.bitwardenSecretTimeoutSeconds, 60, 3600);
+    settings.bitwardenPinTimeoutSeconds = std::clamp(settings.bitwardenPinTimeoutSeconds, 60, 3600);
     settings.bitwardenClipboardClearSeconds = std::clamp(settings.bitwardenClipboardClearSeconds, 5, 300);
     if (settings.everythingHttpHost.empty())
     {
@@ -115,6 +116,10 @@ Settings normalizedSettings(Settings settings)
     if (settings.appearance != Appearance::System && settings.appearance != Appearance::Dark && settings.appearance != Appearance::Light)
     {
         settings.appearance = Appearance::System;
+    }
+    if (settings.windowPosition != WindowPosition::Center && settings.windowPosition != WindowPosition::Upper)
+    {
+        settings.windowPosition = WindowPosition::Center;
     }
     for (auto it = settings.providerPrefixes.begin(); it != settings.providerPrefixes.end();)
     {
@@ -160,6 +165,7 @@ void saveSettings()
     writeString(L"EverythingHttpHost", settings.everythingHttpHost);
     writeString(L"EverythingHttpUsername", settings.everythingHttpUsername);
     writeString(L"EverythingHttpPassword", settings.everythingHttpPassword);
+    writeString(L"BitwardenAccountEmail", settings.bitwardenAccountEmail);
     writeInt(L"EverythingHttpPort", settings.everythingHttpPort);
     writeBool(L"FallbackFileIndex", settings.fallbackFileIndex);
     writeBool(L"IndexDesktop", settings.indexDesktop);
@@ -173,16 +179,18 @@ void saveSettings()
     writeBool(L"UseChromeTabs", settings.useChromeTabs);
     writeBool(L"BitwardenSearchUsernames", settings.bitwardenSearchUsernames);
     writeBool(L"BitwardenUnlockWithPin", settings.bitwardenUnlockWithPin);
+    writeBool(L"BitwardenUnlockWithHello", settings.bitwardenUnlockWithHello);
     writeBool(L"BitwardenRequireMasterOnRestart", settings.bitwardenRequireMasterOnRestart);
-    writeBool(L"BitwardenUseServe", settings.bitwardenUseServe);
+    writeBool(L"BitwardenFastLocalApi", settings.bitwardenUseServe);
     writeBool(L"BitwardenLockOnSleep", settings.bitwardenLockOnSleep);
     writeBool(L"BitwardenLockOnExit", settings.bitwardenLockOnExit);
     writeBool(L"UseSystemAccent", settings.useSystemAccent);
     writeInt(L"Appearance", static_cast<int>(settings.appearance));
+    writeInt(L"WindowPosition", static_cast<int>(settings.windowPosition));
     writeInt(L"MaxResults", settings.maxResults);
     writeInt(L"FileDepth", settings.fileDepth);
     writeInt(L"FileLimit", settings.fileLimit);
-    writeInt(L"BitwardenSecretTimeoutSeconds", settings.bitwardenSecretTimeoutSeconds);
+    writeInt(L"BitwardenPinTimeoutSeconds", settings.bitwardenPinTimeoutSeconds);
     writeInt(L"BitwardenClipboardClearSeconds", settings.bitwardenClipboardClearSeconds);
 
     WritePrivateProfileStringW(L"ProviderShortcuts", nullptr, nullptr, path.c_str());
@@ -220,6 +228,7 @@ void loadSettings()
     settings.everythingHttpHost = readIniString(path, L"QuickPal", L"EverythingHttpHost", settings.everythingHttpHost);
     settings.everythingHttpUsername = readIniString(path, L"QuickPal", L"EverythingHttpUsername", settings.everythingHttpUsername);
     settings.everythingHttpPassword = readIniString(path, L"QuickPal", L"EverythingHttpPassword", settings.everythingHttpPassword);
+    settings.bitwardenAccountEmail = readIniString(path, L"QuickPal", L"BitwardenAccountEmail", settings.bitwardenAccountEmail);
     settings.everythingHttpPort = readInt(L"EverythingHttpPort", settings.everythingHttpPort);
     settings.fallbackFileIndex = readBool(L"FallbackFileIndex", settings.fallbackFileIndex);
     settings.indexDesktop = readBool(L"IndexDesktop", settings.indexDesktop);
@@ -228,21 +237,24 @@ void loadSettings()
     settings.indexDefaultPaths = readBool(L"IndexDefaultPaths", settings.indexDefaultPaths);
     settings.indexStartMenu = readBool(L"IndexStartMenu", settings.indexStartMenu);
     settings.indexPathTools = readBool(L"IndexPathTools", settings.indexPathTools);
-    settings.showLatency = readBool(L"ShowLatency", settings.showLatency);
+    // The old latency footer was diagnostic UI; keep it permanently disabled.
+    settings.showLatency = false;
     settings.shellUsesPowerShell = readBool(L"ShellUsesPowerShell", settings.shellUsesPowerShell);
     settings.useChromeTabs = readBool(L"UseChromeTabs", settings.useChromeTabs);
     settings.bitwardenSearchUsernames = readBool(L"BitwardenSearchUsernames", settings.bitwardenSearchUsernames);
     settings.bitwardenUnlockWithPin = readBool(L"BitwardenUnlockWithPin", settings.bitwardenUnlockWithPin);
+    settings.bitwardenUnlockWithHello = readBool(L"BitwardenUnlockWithHello", settings.bitwardenUnlockWithHello);
     settings.bitwardenRequireMasterOnRestart = readBool(L"BitwardenRequireMasterOnRestart", settings.bitwardenRequireMasterOnRestart);
-    settings.bitwardenUseServe = readBool(L"BitwardenUseServe", settings.bitwardenUseServe);
+    settings.bitwardenUseServe = readBool(L"BitwardenFastLocalApi", settings.bitwardenUseServe);
     settings.bitwardenLockOnSleep = readBool(L"BitwardenLockOnSleep", settings.bitwardenLockOnSleep);
     settings.bitwardenLockOnExit = readBool(L"BitwardenLockOnExit", settings.bitwardenLockOnExit);
     settings.useSystemAccent = readBool(L"UseSystemAccent", settings.useSystemAccent);
     settings.appearance = static_cast<Appearance>(readInt(L"Appearance", static_cast<int>(settings.appearance)));
+    settings.windowPosition = static_cast<WindowPosition>(readInt(L"WindowPosition", static_cast<int>(settings.windowPosition)));
     settings.maxResults = readInt(L"MaxResults", settings.maxResults);
     settings.fileDepth = readInt(L"FileDepth", settings.fileDepth);
     settings.fileLimit = readInt(L"FileLimit", settings.fileLimit);
-    settings.bitwardenSecretTimeoutSeconds = readInt(L"BitwardenSecretTimeoutSeconds", settings.bitwardenSecretTimeoutSeconds);
+    settings.bitwardenPinTimeoutSeconds = readInt(L"BitwardenPinTimeoutSeconds", settings.bitwardenPinTimeoutSeconds);
     settings.bitwardenClipboardClearSeconds = readInt(L"BitwardenClipboardClearSeconds", settings.bitwardenClipboardClearSeconds);
 
     for (const auto& key : readIniKeys(path, L"ProviderShortcuts"))
@@ -283,10 +295,15 @@ SettingRow makeSettingItem(SettingField field, SettingKind kind, std::wstring ti
     return row;
 }
 
-const std::vector<SettingRow>& settingRows()
+const std::vector<SettingSection>& settingSections()
 {
-    static const std::vector<SettingRow> rows = [] {
-        std::vector<SettingRow> list;
+    static const std::vector<SettingSection> sections = [] {
+        std::vector<SettingSection> result;
+        SettingSection general;
+        general.id = L"general";
+        general.title = L"General";
+        general.subtitle = L"Appearance, result density, and maintenance";
+        std::vector<SettingRow>& list = general.rows;
         auto header = [&](const wchar_t* text) {
             list.push_back(makeSettingHeader(text));
         };
@@ -296,30 +313,63 @@ const std::vector<SettingRow>& settingRows()
 
         header(L"Appearance");
         item(SettingField::Appearance, SettingKind::Choice, L"Theme", L"Follow Windows, or pin QuickPal to dark or light");
+        item(SettingField::WindowPosition, SettingKind::Choice, L"Window position", L"Center on screen, or sit higher for faster scanning");
         item(SettingField::UseSystemAccent, SettingKind::Toggle, L"System accent", L"Tint highlights with the Windows accent color");
+
+        header(L"Behavior");
+        item(SettingField::MaxResults, SettingKind::Stepper, L"Max results", L"Bounds ranking and rendering work per keystroke");
+
+        header(L"Maintenance");
+        item(SettingField::ReloadIndexes, SettingKind::Action, L"Reload indexes", L"Rebuild every provider immediately");
+
+        result.push_back(std::move(general));
 
         const Settings snapshot = getSettingsSnapshot();
         const ProviderContext ctx{ snapshot, nullptr };
         for (const auto& entry : ProviderRegistry::instance().entries())
         {
-            entry.provider->settings(ctx, list);
+            SettingSection section;
+            section.id = entry.info.id;
+            section.title = entry.info.title;
+            section.subtitle = entry.info.settingsSummary;
+            entry.provider->settings(ctx, section.rows);
+            if (section.rows.empty())
+            {
+                continue;
+            }
+            if (section.rows.front().isHeader && _wcsicmp(section.rows.front().header.c_str(), section.title.c_str()) == 0)
+            {
+                section.rows.erase(section.rows.begin());
+            }
+            result.push_back(std::move(section));
         }
 
-        header(L"Behavior");
-        item(SettingField::MaxResults, SettingKind::Stepper, L"Max results", L"Bounds ranking and rendering work per keystroke");
-        item(SettingField::ShowLatency, SettingKind::Toggle, L"Latency readout", L"Show result timing in the footer");
-
-        header(L"Maintenance");
-        item(SettingField::ReloadIndexes, SettingKind::Action, L"Reload indexes", L"Rebuild every provider immediately");
-
-        return list;
+        return result;
     }();
-    return rows;
+    return sections;
 }
 
-int firstSelectableRow()
+const SettingSection& settingSection(int index)
 {
-    const auto& rows = settingRows();
+    const auto& sections = settingSections();
+    return sections[static_cast<size_t>(std::clamp(index, 0, static_cast<int>(sections.size()) - 1))];
+}
+
+int settingSectionIndex(const std::wstring& id)
+{
+    const auto& sections = settingSections();
+    for (int i = 0; i < static_cast<int>(sections.size()); ++i)
+    {
+        if (_wcsicmp(sections[static_cast<size_t>(i)].id.c_str(), id.c_str()) == 0)
+        {
+            return i;
+        }
+    }
+    return 0;
+}
+
+int firstSelectableRow(const std::vector<SettingRow>& rows)
+{
     for (int i = 0; i < static_cast<int>(rows.size()); ++i)
     {
         if (!rows[i].isHeader)
@@ -330,9 +380,8 @@ int firstSelectableRow()
     return 0;
 }
 
-int nextSelectableRow(int from, int direction)
+int nextSelectableRow(const std::vector<SettingRow>& rows, int from, int direction)
 {
-    const auto& rows = settingRows();
     const int count = static_cast<int>(rows.size());
     if (count == 0)
     {
@@ -371,6 +420,7 @@ bool isToggleSetting(SettingField field)
     case SettingField::UseChromeTabs:
     case SettingField::BitwardenSearchUsernames:
     case SettingField::BitwardenUnlockWithPin:
+    case SettingField::BitwardenUnlockWithHello:
     case SettingField::BitwardenRequireMasterOnRestart:
     case SettingField::BitwardenUseServe:
     case SettingField::BitwardenLockOnSleep:
@@ -387,7 +437,7 @@ bool isNumericSetting(SettingField field)
 {
     return field == SettingField::MaxResults || field == SettingField::FileDepth ||
            field == SettingField::FileLimit || field == SettingField::EverythingHttpPort ||
-           field == SettingField::BitwardenSecretTimeoutSeconds ||
+           field == SettingField::BitwardenPinTimeoutSeconds ||
            field == SettingField::BitwardenClipboardClearSeconds;
 }
 
@@ -405,7 +455,7 @@ StepperSpec stepperSpec(SettingField field)
         return StepperSpec{ 1, 8, nullptr, 0, 1 };
     case SettingField::FileLimit:
         return StepperSpec{ 1000, 150000, kFileLimitLadder, static_cast<int>(std::size(kFileLimitLadder)), 5000 };
-    case SettingField::BitwardenSecretTimeoutSeconds:
+    case SettingField::BitwardenPinTimeoutSeconds:
         return StepperSpec{ 60, 3600, nullptr, 0, 60 };
     case SettingField::BitwardenClipboardClearSeconds:
         return StepperSpec{ 5, 300, nullptr, 0, 5 };
@@ -422,7 +472,7 @@ int settingNumericValue(SettingField field, const Settings& settings)
     case SettingField::FileDepth: return settings.fileDepth;
     case SettingField::FileLimit: return settings.fileLimit;
     case SettingField::EverythingHttpPort: return settings.everythingHttpPort;
-    case SettingField::BitwardenSecretTimeoutSeconds: return settings.bitwardenSecretTimeoutSeconds;
+    case SettingField::BitwardenPinTimeoutSeconds: return settings.bitwardenPinTimeoutSeconds;
     case SettingField::BitwardenClipboardClearSeconds: return settings.bitwardenClipboardClearSeconds;
     default: return 0;
     }
@@ -440,7 +490,7 @@ void setSettingNumericValue(SettingField field, int value)
         case SettingField::FileDepth: g_settings.fileDepth = clamped; break;
         case SettingField::FileLimit: g_settings.fileLimit = clamped; break;
         case SettingField::EverythingHttpPort: g_settings.everythingHttpPort = clamped; break;
-        case SettingField::BitwardenSecretTimeoutSeconds: g_settings.bitwardenSecretTimeoutSeconds = clamped; break;
+        case SettingField::BitwardenPinTimeoutSeconds: g_settings.bitwardenPinTimeoutSeconds = clamped; break;
         case SettingField::BitwardenClipboardClearSeconds: g_settings.bitwardenClipboardClearSeconds = clamped; break;
         default: break;
         }
@@ -456,6 +506,11 @@ const wchar_t* const* settingChoices(SettingField field, int& count)
         count = static_cast<int>(std::size(kAppearanceChoices));
         return kAppearanceChoices;
     }
+    if (field == SettingField::WindowPosition)
+    {
+        count = static_cast<int>(std::size(kWindowPositionChoices));
+        return kWindowPositionChoices;
+    }
     count = 0;
     return nullptr;
 }
@@ -465,6 +520,10 @@ int settingChoiceIndex(SettingField field, const Settings& settings)
     if (field == SettingField::Appearance)
     {
         return static_cast<int>(settings.appearance);
+    }
+    if (field == SettingField::WindowPosition)
+    {
+        return static_cast<int>(settings.windowPosition);
     }
     return 0;
 }
@@ -486,6 +545,7 @@ bool settingToggleValue(SettingField field, const Settings& settings)
     case SettingField::UseChromeTabs: return settings.useChromeTabs;
     case SettingField::BitwardenSearchUsernames: return settings.bitwardenSearchUsernames;
     case SettingField::BitwardenUnlockWithPin: return settings.bitwardenUnlockWithPin;
+    case SettingField::BitwardenUnlockWithHello: return settings.bitwardenUnlockWithHello;
     case SettingField::BitwardenRequireMasterOnRestart: return settings.bitwardenRequireMasterOnRestart;
     case SettingField::BitwardenUseServe: return settings.bitwardenUseServe;
     case SettingField::BitwardenLockOnSleep: return settings.bitwardenLockOnSleep;
@@ -513,7 +573,7 @@ std::wstring settingValueText(SettingField field, const Settings& settings)
             }
             return text + L"k";
         }
-        if (field == SettingField::BitwardenSecretTimeoutSeconds)
+        if (field == SettingField::BitwardenPinTimeoutSeconds)
         {
             return std::to_wstring(value / 60) + L"m";
         }
@@ -523,7 +583,7 @@ std::wstring settingValueText(SettingField field, const Settings& settings)
         }
         return std::to_wstring(value);
     }
-    if (field == SettingField::Appearance)
+    if (field == SettingField::Appearance || field == SettingField::WindowPosition)
     {
         int count = 0;
         const wchar_t* const* choices = settingChoices(field, count);
@@ -583,6 +643,15 @@ static std::wstring providerPrefixValue(const std::wstring& providerId, const Se
 std::wstring providerPrefixValue(const std::wstring& providerId)
 {
     return providerPrefixValue(providerId, getSettingsSnapshot());
+}
+
+void setBitwardenAccountEmail(const std::wstring& email)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        g_settings.bitwardenAccountEmail = email;
+    }
+    saveSettings();
 }
 
 void setProviderPrefixValue(const std::wstring& providerId, const std::wstring& prefix)
@@ -668,6 +737,11 @@ std::wstring settingValueText(const SettingItem& item, const Settings& settings)
     if (item.field == SettingField::ProviderPrefix)
     {
         return providerPrefixValue(item.providerId, settings);
+    }
+    if (item.field == SettingField::ProviderAction && item.providerId == L"bitwarden" &&
+        item.settingKey == L"account-email")
+    {
+        return settings.bitwardenAccountEmail.empty() ? L"Set" : settings.bitwardenAccountEmail;
     }
     return settingValueText(item.field, settings);
 }
@@ -765,6 +839,18 @@ static void mutateLocked(SettingField field, int direction)
         }
         break;
     }
+    case SettingField::WindowPosition:
+    {
+        int count = 0;
+        settingChoices(field, count);
+        if (count > 0)
+        {
+            int index = static_cast<int>(g_settings.windowPosition) + (direction >= 0 ? 1 : -1);
+            index = (index % count + count) % count;
+            g_settings.windowPosition = static_cast<WindowPosition>(index);
+        }
+        break;
+    }
     case SettingField::UseSystemAccent: g_settings.useSystemAccent = !g_settings.useSystemAccent; break;
     case SettingField::UseEverything: g_settings.useEverything = !g_settings.useEverything; break;
     case SettingField::UseEverythingHttp: g_settings.useEverythingHttp = !g_settings.useEverythingHttp; break;
@@ -781,6 +867,7 @@ static void mutateLocked(SettingField field, int direction)
     case SettingField::UseChromeTabs: g_settings.useChromeTabs = !g_settings.useChromeTabs; break;
     case SettingField::BitwardenSearchUsernames: g_settings.bitwardenSearchUsernames = !g_settings.bitwardenSearchUsernames; break;
     case SettingField::BitwardenUnlockWithPin: g_settings.bitwardenUnlockWithPin = !g_settings.bitwardenUnlockWithPin; break;
+    case SettingField::BitwardenUnlockWithHello: g_settings.bitwardenUnlockWithHello = !g_settings.bitwardenUnlockWithHello; break;
     case SettingField::BitwardenRequireMasterOnRestart: g_settings.bitwardenRequireMasterOnRestart = !g_settings.bitwardenRequireMasterOnRestart; break;
     case SettingField::BitwardenUseServe: g_settings.bitwardenUseServe = !g_settings.bitwardenUseServe; break;
     case SettingField::BitwardenLockOnSleep: g_settings.bitwardenLockOnSleep = !g_settings.bitwardenLockOnSleep; break;
@@ -796,8 +883,8 @@ static void mutateLocked(SettingField field, int direction)
     case SettingField::FileLimit:
         g_settings.fileLimit = stepLadder(stepperSpec(field), g_settings.fileLimit, direction);
         break;
-    case SettingField::BitwardenSecretTimeoutSeconds:
-        g_settings.bitwardenSecretTimeoutSeconds = stepLadder(stepperSpec(field), g_settings.bitwardenSecretTimeoutSeconds, direction);
+    case SettingField::BitwardenPinTimeoutSeconds:
+        g_settings.bitwardenPinTimeoutSeconds = stepLadder(stepperSpec(field), g_settings.bitwardenPinTimeoutSeconds, direction);
         break;
     case SettingField::BitwardenClipboardClearSeconds:
         g_settings.bitwardenClipboardClearSeconds = stepLadder(stepperSpec(field), g_settings.bitwardenClipboardClearSeconds, direction);

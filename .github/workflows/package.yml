@@ -1,0 +1,166 @@
+name: Package QuickPal
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example, 0.1.0)
+        required: true
+        default: 0.1.0
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  HARDENED_BITWARDEN_REPOSITORY: https://github.com/TheItalianGame/quickpal-bitwarden.git
+  HARDENED_BITWARDEN_COMMIT: 2e4b1fba6e02ca9822043ba89deb8809468e0b7b
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Select package version
+        id: version
+        shell: pwsh
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $version = $env:DISPATCH_VERSION
+          } else {
+            $version = "0.1.$env:GITHUB_RUN_NUMBER"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version must contain three numeric components: $version"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Build and verify pinned hardened Bitwarden CLI
+        shell: pwsh
+        run: |
+          .\build-bitwarden.ps1 -Force
+
+          $provenancePath = ".\third_party\Bitwarden\PROVENANCE.json"
+          $binaryPath = ".\third_party\Bitwarden\bw.exe"
+          $provenance = Get-Content -Raw -LiteralPath $provenancePath | ConvertFrom-Json
+          if ($provenance.repository -ne $env:HARDENED_BITWARDEN_REPOSITORY) {
+            throw "Hardened Bitwarden repository mismatch."
+          }
+          if ($provenance.commit -ne $env:HARDENED_BITWARDEN_COMMIT) {
+            throw "Hardened Bitwarden commit mismatch."
+          }
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binaryPath).Hash
+          if ($actualHash -ne $provenance.sha256) {
+            throw "Hardened Bitwarden binary does not match its source-build provenance."
+          }
+          $serveHelp = (& $binaryPath serve --help 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or
+              -not $serveHelp.Contains("--auth-token-env") -or
+              -not $serveHelp.Contains("--allow-unauthenticated")) {
+            throw "Hardened Bitwarden secure serve options are missing."
+          }
+
+      - name: Install MinGW UCRT64 toolchain
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Expose MinGW tools to PowerShell
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $env:MSYS2_LOCATION "ucrt64\bin")
+
+      - name: Install WiX 6
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+
+      - name: Build ZIP and MSI
+        shell: pwsh
+        run: |
+          .\package.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Verify release payload
+        shell: pwsh
+        run: |
+          $exe = Get-Item -LiteralPath ".\bin\QuickPal.exe"
+          if ($exe.VersionInfo.ProductVersion -ne $env:RELEASE_VERSION) {
+            throw "Executable version does not match package version."
+          }
+          .\bin\QuickPalBench.exe --iterations 20 --warmups 2 --no-files
+          wix msi validate ".\dist\QuickPal-$env:RELEASE_VERSION-win-x64.msi"
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSI validation failed."
+          }
+          Get-ChildItem -LiteralPath ".\dist" -File |
+            Select-Object Name, Length |
+            Format-Table -AutoSize
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: QuickPal-${{ steps.version.outputs.version }}-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.msi
+            dist/*SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: QuickPal-${{ needs.package.outputs.version }}-windows-x64
+          path: dist
+
+      - name: Publish tagged GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem -LiteralPath ".\dist" -File |
+            Where-Object { $_.Extension -in '.zip', '.msi', '.txt' } |
+            ForEach-Object { $_.FullName }
+          & gh release view $env:GITHUB_REF_NAME --json tagName 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME @assets --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME @assets --generate-notes --title $env:GITHUB_REF_NAME
+          }

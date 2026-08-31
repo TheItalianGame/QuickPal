@@ -19,14 +19,18 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cwctype>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -50,6 +54,8 @@ struct Options
     bool includeFallbackFileIndex = false;
     bool json = false;
     bool listScenarios = false;
+    bool asyncSmoke = false;
+    bool asyncSmokeOnly = false;
     std::vector<std::wstring> customQueries;
     std::vector<Scenario> customProviderQueries;
 };
@@ -99,6 +105,8 @@ void printUsage()
         << "  --no-files                 skip file-search scenarios\n"
         << "  --include-fallback-index   build fallback file index before measuring\n"
         << "  --list-scenarios           print the default provider benchmark matrix\n"
+        << "  --async-smoke              verify background provider work leaves search responsive\n"
+        << "  --async-smoke-only         run only the asynchronous provider smoke test\n"
         << "  --json                     emit machine-readable JSON\n"
         << "  --query TEXT               add a custom measured typing scenario\n"
         << "  --provider-query ID TEXT   add a custom provider-hotkey scenario\n";
@@ -152,6 +160,15 @@ Options parseOptions()
         else if (arg == L"--list-scenarios")
         {
             options.listScenarios = true;
+        }
+        else if (arg == L"--async-smoke")
+        {
+            options.asyncSmoke = true;
+        }
+        else if (arg == L"--async-smoke-only")
+        {
+            options.asyncSmoke = true;
+            options.asyncSmokeOnly = true;
         }
         else if (arg == L"--json")
         {
@@ -345,6 +362,89 @@ void primeAsyncProviders(const Settings& settings, bool includeFiles)
     Sleep(900);
 }
 
+std::mutex g_asyncSmokeMutex;
+std::vector<std::wstring> g_asyncSmokeStatuses;
+DWORD g_asyncSmokeWorkerThread = 0;
+
+void asyncSmokeStatusReporter(HWND, const wchar_t* providerId, const std::wstring& message)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_asyncSmokeMutex);
+        g_asyncSmokeStatuses.push_back(message);
+    }
+    setProviderStatus(providerId ? providerId : L"async-smoke", message);
+}
+
+bool runAsyncFlowSmoke(const Settings& settings, double searchBudgetMs)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_asyncSmokeMutex);
+        g_asyncSmokeStatuses.clear();
+        g_asyncSmokeWorkerThread = 0;
+    }
+    clearProviderStatus();
+
+    const DWORD callerThread = GetCurrentThreadId();
+    std::atomic_bool completed{ false };
+    const auto queueStart = std::chrono::steady_clock::now();
+    std::thread worker([&] {
+        {
+            std::lock_guard<std::mutex> lock(g_asyncSmokeMutex);
+            g_asyncSmokeWorkerThread = GetCurrentThreadId();
+        }
+        const ProviderContext workerContext{ settings, nullptr, nullptr, asyncSmokeStatusReporter };
+        workerContext.reportStatus(L"async-smoke", L"Background refresh queued.");
+        Sleep(300);
+        workerContext.reportStatus(L"async-smoke", L"Background refresh complete.");
+        completed.store(true);
+    });
+    const auto queueEnd = std::chrono::steady_clock::now();
+    const double queueMs = std::chrono::duration<double, std::milli>(queueEnd - queueStart).count();
+
+    std::vector<double> searchSamples;
+    uint64_t checksum = 0;
+    while (!completed.load())
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const SearchOutput output = runProviderSearch(L"12345*67", L"calculator", settings, nullptr);
+        const auto end = std::chrono::steady_clock::now();
+        searchSamples.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+        checksum ^= foldOutput(output) + static_cast<uint64_t>(searchSamples.size());
+        Sleep(1);
+    }
+    worker.join();
+
+    std::sort(searchSamples.begin(), searchSamples.end());
+    const double searchP95 = percentile(searchSamples, 0.95);
+    std::vector<std::wstring> statuses;
+    DWORD workerThread = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_asyncSmokeMutex);
+        statuses = g_asyncSmokeStatuses;
+        workerThread = g_asyncSmokeWorkerThread;
+    }
+    const std::wstring finalStatus = getStatus();
+    const bool queueReturnedImmediately = queueMs < 50.0;
+    const bool searchStayedResponsive = !searchSamples.empty() && searchP95 <= searchBudgetMs;
+    const bool statusProgressed = statuses.size() == 2 &&
+        statuses[0] == L"Background refresh queued." &&
+        statuses[1] == L"Background refresh complete." &&
+        finalStatus.find(L"Background refresh complete.") != std::wstring::npos;
+    const bool usedWorkerThread = workerThread != 0 && workerThread != callerThread;
+    const bool passed = queueReturnedImmediately && searchStayedResponsive && statusProgressed && usedWorkerThread;
+
+    std::cout << "QuickPal asynchronous provider smoke\n"
+              << "Queue return: " << std::fixed << std::setprecision(3) << queueMs << " ms (budget 50 ms)\n"
+              << "Search during refresh: " << searchSamples.size() << " samples, p95 "
+              << searchP95 << " ms (budget " << searchBudgetMs << " ms)\n"
+              << "Provider status events: " << statuses.size() << " (expected 2)\n"
+              << "Worker thread separated: " << (usedWorkerThread ? "yes" : "no") << "\n"
+              << "Checksum: " << checksum << "\n"
+              << "Async smoke: " << (passed ? "PASS" : "FAIL") << "\n\n";
+    clearProviderStatus();
+    return passed;
+}
+
 std::string jsonEscape(const std::string& value)
 {
     std::string out;
@@ -520,9 +620,16 @@ int main()
     settings.showLatency = false;
     primeAsyncProviders(settings, options.includeFiles);
 
+    const bool asyncPassed = !options.asyncSmoke || runAsyncFlowSmoke(settings, options.budgetMs);
+    if (options.asyncSmokeOnly)
+    {
+        CoUninitialize();
+        return asyncPassed ? 0 : 1;
+    }
+
     std::vector<Stats> rows;
     rows.reserve(scenarios.size());
-    bool passed = true;
+    bool passed = asyncPassed;
     for (const Scenario& scenario : scenarios)
     {
         Stats stats = runScenario(scenario, settings, options);

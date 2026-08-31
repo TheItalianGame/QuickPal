@@ -107,6 +107,8 @@ struct Command
     DWORD processId = 0;
     CommandKind targetKind = CommandKind::Builtin;
     ActionKind action = ActionKind::None;
+    wchar_t shortcutKey = 0;
+    bool hasTotp = false;
     // Id of the provider that produced this, stamped automatically when a result is
     // added. Points at a static literal, so copying a Command stays cheap.
     const wchar_t* provider = nullptr;
@@ -155,6 +157,12 @@ enum class Appearance
     Light,
 };
 
+enum class WindowPosition
+{
+    Center,
+    Upper,
+};
+
 struct Settings
 {
     bool useEverything = true;
@@ -166,21 +174,23 @@ struct Settings
     bool indexDefaultPaths = true;
     bool indexStartMenu = true;
     bool indexPathTools = true;
-    bool showLatency = true;
+    bool showLatency = false;
     bool shellUsesPowerShell = true;
     bool useChromeTabs = true;
     bool bitwardenSearchUsernames = true;
     bool bitwardenUnlockWithPin = true;
+    bool bitwardenUnlockWithHello = false;
     bool bitwardenRequireMasterOnRestart = true;
-    bool bitwardenUseServe = false;
+    bool bitwardenUseServe = true;
     bool bitwardenLockOnSleep = true;
     bool bitwardenLockOnExit = true;
     bool useSystemAccent = true;
     Appearance appearance = Appearance::System;
+    WindowPosition windowPosition = WindowPosition::Center;
     int maxResults = kDefaultMaxResults;
     int fileDepth = 5;
     int fileLimit = 50000;
-    int bitwardenSecretTimeoutSeconds = 300;
+    int bitwardenPinTimeoutSeconds = 900;
     int bitwardenClipboardClearSeconds = 30;
 
     // Everything's local HTTP server; defaults are imported from Everything.ini
@@ -188,6 +198,7 @@ struct Settings
     std::wstring everythingHttpHost = L"127.0.0.1";
     std::wstring everythingHttpUsername;
     std::wstring everythingHttpPassword;
+    std::wstring bitwardenAccountEmail;
     int everythingHttpPort = 2342;
 
     std::unordered_map<std::wstring, std::wstring> providerShortcuts = {

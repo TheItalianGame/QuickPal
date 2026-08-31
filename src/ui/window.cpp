@@ -54,6 +54,11 @@ bool shiftDown()
     return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 }
 
+bool altDown()
+{
+    return (GetKeyState(VK_MENU) & 0x8000) != 0;
+}
+
 void invalidate()
 {
     if (g_app.hwnd)
@@ -193,6 +198,7 @@ int hitTestPaletteRow(const PaletteLayout& layout, float x, float y)
 struct SettingsHit
 {
     int row = -1;
+    int section = -1;
     PressedPart part = PressedPart::None;
     int segment = -1;
 };
@@ -200,12 +206,21 @@ struct SettingsHit
 SettingsHit hitTestSettings(const SettingsLayout& layout, float x, float y)
 {
     SettingsHit hit;
+    for (int i = 0; i < static_cast<int>(layout.railRows.size()); ++i)
+    {
+        if (pointInRect(layout.railRows[static_cast<size_t>(i)], x, y))
+        {
+            hit.section = i;
+            hit.part = PressedPart::SettingsSection;
+            return hit;
+        }
+    }
     if (!pointInRect(layout.listArea, x, y))
     {
         return hit;
     }
 
-    const auto& rows = settingRows();
+    const auto& rows = activeSettingRows();
     for (size_t i = 0; i < layout.rows.size() && i < rows.size(); ++i)
     {
         const SettingsRowRects& r = layout.rows[i];
@@ -514,6 +529,34 @@ void focusWindow(HWND hwnd)
     SetForegroundWindow(hwnd);
 }
 
+void restoreQuickPalWindow()
+{
+    if (!g_app.hwnd || !IsWindow(g_app.hwnd))
+    {
+        return;
+    }
+    g_app.visible = true;
+    ShowWindow(g_app.hwnd, IsIconic(g_app.hwnd) ? SW_RESTORE : SW_SHOWNORMAL);
+    SetWindowPos(g_app.hwnd, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(g_app.hwnd);
+    SetFocus(g_app.hwnd);
+    resetCaretBlink();
+    invalidate();
+}
+
+void reportProviderStatus(HWND window, const wchar_t* providerId, const std::wstring& message)
+{
+    const std::wstring title = providerTitleForId(providerId);
+    setProviderStatus(title.empty() ? L"Provider" : title, message);
+    if (window && window == g_app.hwnd && g_app.visible &&
+        GetWindowThreadProcessId(window, nullptr) == GetCurrentThreadId())
+    {
+        restoreQuickPalWindow();
+        UpdateWindow(window);
+    }
+}
+
 RECT monitorWorkAreaForWindow(HWND hwnd)
 {
     RECT fallback{};
@@ -561,11 +604,83 @@ void centerWindow(HWND hwnd)
     focusWindow(hwnd);
 }
 
+wchar_t preferredActionShortcut(ActionKind action)
+{
+    switch (action)
+    {
+    case ActionKind::Open: return L'O';
+    case ActionKind::RunAsAdministrator: return L'A';
+    case ActionKind::OpenContainingFolder: return L'F';
+    case ActionKind::CopyPath: return L'C';
+    case ActionKind::CopyName: return L'N';
+    case ActionKind::CopyTitle: return L'T';
+    case ActionKind::CopySubtitle: return L'S';
+    case ActionKind::OpenWith: return L'W';
+    case ActionKind::KillProcess: return L'K';
+    case ActionKind::PasteText: return L'P';
+    case ActionKind::PinClipboard: return L'N';
+    case ActionKind::UnpinClipboard: return L'U';
+    case ActionKind::CloseBrowserTab: return L'X';
+    case ActionKind::ReloadBrowserTab: return L'R';
+    case ActionKind::WindowMinimize: return L'I';
+    case ActionKind::WindowMaximizeRestore: return L'M';
+    case ActionKind::WindowSnapLeft: return L'L';
+    case ActionKind::WindowSnapRight: return L'R';
+    case ActionKind::WindowCenter: return L'C';
+    case ActionKind::WindowClose: return L'X';
+    case ActionKind::BitwardenCopyUsername: return L'U';
+    case ActionKind::BitwardenCopyPassword: return L'P';
+    case ActionKind::BitwardenCopyTotp: return L'T';
+    case ActionKind::BitwardenOpenSite: return L'O';
+    case ActionKind::BitwardenOpenItem: return L'B';
+    case ActionKind::ConfigureProvider: return L'G';
+    case ActionKind::SetProviderShortcut: return L'K';
+    case ActionKind::SetProviderPrefix: return L'E';
+    default: return 0;
+    }
+}
+
+bool actionShortcutUsed(const std::vector<Result>& rows, wchar_t key)
+{
+    return std::any_of(rows.begin(), rows.end(), [key](const Result& row) {
+        return row.command.shortcutKey == key;
+    });
+}
+
+wchar_t chooseActionShortcut(const std::vector<Result>& rows, ActionKind action,
+                             const std::wstring& title)
+{
+    const wchar_t preferred = preferredActionShortcut(action);
+    if (preferred != 0 && !actionShortcutUsed(rows, preferred))
+    {
+        return preferred;
+    }
+
+    for (wchar_t ch : title)
+    {
+        const wchar_t candidate = static_cast<wchar_t>(std::towupper(ch));
+        if (std::iswalnum(candidate) && !actionShortcutUsed(rows, candidate))
+        {
+            return candidate;
+        }
+    }
+
+    for (wchar_t candidate = L'1'; candidate <= L'9'; ++candidate)
+    {
+        if (!actionShortcutUsed(rows, candidate))
+        {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
 void addAction(std::vector<Result>& rows, ActionKind action, const std::wstring& title,
                const std::wstring& subtitle, int score)
 {
     Command command = makeCommand(CommandKind::Action, title, subtitle, L"", 0);
     command.action = action;
+    command.shortcutKey = chooseActionShortcut(rows, action, title);
     command.targetKind = g_app.actionTarget.kind;
     command.processId = g_app.actionTarget.processId;
     command.hwnd = g_app.actionTarget.hwnd;
@@ -592,7 +707,9 @@ void leaveActionMenu(bool restoreQuery)
 
 bool selectProviderSettingRow(const std::wstring& providerId, SettingField field)
 {
-    const auto& rows = settingRows();
+    g_app.settingsSection = settingSectionIndex(providerId);
+    g_app.settingsScroll = 0.0f;
+    const auto& rows = activeSettingRows();
     for (int i = 0; i < static_cast<int>(rows.size()); ++i)
     {
         if (!rows[static_cast<size_t>(i)].isHeader &&
@@ -617,7 +734,8 @@ void lockBitwardenSession()
     }
     Command command = makeCommand(CommandKind::BitwardenControl, L"Lock Bitwarden", L"", L"lock", 0);
     command.provider = L"bitwarden";
-    executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground);
+    executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground,
+                           reportProviderStatus);
 }
 
 void showProviderSettings(const std::wstring& providerId, SettingField field)
@@ -647,11 +765,12 @@ void showActionsForSelected()
     g_app.selected = 0;
     g_app.hovered = -1;
 
+    const bool bitwardenTarget = g_app.actionTarget.kind == CommandKind::BitwardenItem;
     if (g_app.actionTarget.kind == CommandKind::Process)
     {
         addAction(g_app.results, ActionKind::KillProcess, L"Kill process", g_app.actionTarget.subtitle, 30000);
     }
-    else
+    else if (!bitwardenTarget)
     {
         addAction(g_app.results, ActionKind::Open, L"Open", g_app.actionTarget.title, 30000);
     }
@@ -705,12 +824,15 @@ void showActionsForSelected()
 
     if (g_app.actionTarget.kind == CommandKind::BitwardenItem)
     {
-        addAction(g_app.results, ActionKind::BitwardenCopyUsername, L"Copy username",
-                  g_app.actionTarget.title, 29790);
         addAction(g_app.results, ActionKind::BitwardenCopyPassword, L"Copy password",
+                  g_app.actionTarget.title, 29790);
+        addAction(g_app.results, ActionKind::BitwardenCopyUsername, L"Copy username",
                   g_app.actionTarget.title, 29780);
-        addAction(g_app.results, ActionKind::BitwardenCopyTotp, L"Copy TOTP",
-                  g_app.actionTarget.title, 29770);
+        if (g_app.actionTarget.hasTotp)
+        {
+            addAction(g_app.results, ActionKind::BitwardenCopyTotp, L"Copy TOTP",
+                      g_app.actionTarget.title, 29770);
+        }
         addAction(g_app.results, ActionKind::BitwardenOpenSite, L"Open site",
                   g_app.actionTarget.arg.empty() ? g_app.actionTarget.title : g_app.actionTarget.arg, 29760);
         addAction(g_app.results, ActionKind::BitwardenOpenItem, L"Open in Bitwarden",
@@ -731,17 +853,17 @@ void showActionsForSelected()
                       baseNameForCommand(g_app.actionTarget), 29400);
         }
     }
-    else if (!g_app.actionTarget.arg.empty())
+    else if (!bitwardenTarget && !g_app.actionTarget.arg.empty())
     {
         addAction(g_app.results, ActionKind::CopyPath, L"Copy value", g_app.actionTarget.arg, 29600);
     }
 
-    if (!g_app.actionTarget.title.empty())
+    if (!bitwardenTarget && !g_app.actionTarget.title.empty())
     {
         addAction(g_app.results, ActionKind::CopyTitle, L"Copy title",
                   g_app.actionTarget.title, 29300);
     }
-    if (!g_app.actionTarget.subtitle.empty())
+    if (!bitwardenTarget && !g_app.actionTarget.subtitle.empty())
     {
         addAction(g_app.results, ActionKind::CopySubtitle, L"Copy subtitle",
                   g_app.actionTarget.subtitle, 29200);
@@ -864,7 +986,8 @@ bool executeActionCommand(const Command& action)
     {
         Command routed = target;
         routed.action = action.action;
-        executeThroughProvider(routed, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground);
+        executeThroughProvider(routed, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground,
+                               reportProviderStatus);
         break;
     }
     case ActionKind::ConfigureProvider:
@@ -955,10 +1078,22 @@ void executeCommand(const Command& command)
         ShowWindow(g_app.hwnd, SW_HIDE);
     }
 
-    if (!executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground))
+    const std::wstring providerAction = command.data.empty() ? command.arg : command.data;
+    const bool keepBitwardenSearch = command.kind == CommandKind::BitwardenControl && command.provider &&
+        wcscmp(command.provider, L"bitwarden") == 0 &&
+        (providerAction == L"connect" || providerAction == L"sync");
+    const bool handledByProvider = executeThroughProvider(command, getSettingsSnapshot(), g_app.hwnd,
+                                                          g_app.previousForeground, reportProviderStatus);
+    if (!handledByProvider && command.kind != CommandKind::BitwardenControl)
     {
         // Shared default: the command names a path or a URI.
         openPathOrUri(command.arg);
+    }
+    if (keepBitwardenSearch)
+    {
+        refreshResults();
+        restoreQuickPalWindow();
+        return;
     }
     hidePalette();
 }
@@ -979,7 +1114,7 @@ void commitNumberEdit()
     {
         return;
     }
-    const auto& rows = settingRows();
+    const auto& rows = activeSettingRows();
     const int index = g_app.settingsSelected;
     if (index >= 0 && index < static_cast<int>(rows.size()) && !rows[index].isHeader &&
         rows[index].item.kind == SettingKind::Stepper && !g_app.numberBuffer.empty())
@@ -1000,6 +1135,27 @@ void cancelNumberEdit()
 {
     g_app.editingNumber = false;
     g_app.numberBuffer.clear();
+}
+
+void switchSettingsSection(int index)
+{
+    const auto& sections = settingSections();
+    if (sections.empty())
+    {
+        return;
+    }
+
+    commitNumberEdit();
+    cancelShortcutCapture();
+    cancelPrefixEdit();
+    g_app.settingsSection = std::clamp(index, 0, static_cast<int>(sections.size()) - 1);
+    g_app.settingsSelected = firstSelectableRow(activeSettingRows());
+    g_app.settingsHovered = -1;
+    g_app.settingsScroll = 0.0f;
+    g_app.pressedRow = -1;
+    g_app.pressedSettingsSection = -1;
+    g_app.pressedPart = PressedPart::None;
+    invalidate();
 }
 
 void beginShortcutCapture(const std::wstring& providerId)
@@ -1132,7 +1288,7 @@ void handlePrefixEditKey(WPARAM key)
     case VK_UP:
         if (commitPrefixEdit())
         {
-            g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, -1);
+            g_app.settingsSelected = nextSelectableRow(activeSettingRows(), g_app.settingsSelected, -1);
             scrollSettingsSelectionIntoView();
             invalidate();
         }
@@ -1141,7 +1297,7 @@ void handlePrefixEditKey(WPARAM key)
     case VK_TAB:
         if (commitPrefixEdit())
         {
-            g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, 1);
+            g_app.settingsSelected = nextSelectableRow(activeSettingRows(), g_app.settingsSelected, 1);
             scrollSettingsSelectionIntoView();
             invalidate();
         }
@@ -1166,7 +1322,7 @@ void handlePrefixEditKey(WPARAM key)
 
 void applySettingAt(int rowIndex, int direction)
 {
-    const auto& rows = settingRows();
+    const auto& rows = activeSettingRows();
     if (rowIndex < 0 || rowIndex >= static_cast<int>(rows.size()) || rows[rowIndex].isHeader)
     {
         return;
@@ -1196,10 +1352,16 @@ void applySettingAt(int rowIndex, int direction)
     {
         if (Provider* provider = ProviderRegistry::instance().byId(item.providerId.c_str()))
         {
-            const ProviderContext ctx{ getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground };
-            if (provider->applySetting(ctx, item))
+            const ProviderContext ctx{ getSettingsSnapshot(), g_app.hwnd, g_app.previousForeground,
+                                       reportProviderStatus };
+            const bool applied = provider->applySetting(ctx, item);
+            if (item.settingKey != L"install")
             {
-                setTransientStatus(L"Opened " + item.title + L".");
+                restoreQuickPalWindow();
+            }
+            if (applied)
+            {
+                setTransientStatus(item.title + L" complete.");
                 invalidate();
                 return;
             }
@@ -1220,6 +1382,10 @@ void applySettingAt(int rowIndex, int direction)
     if (change.needsRebuild)
     {
         rebuildIndexAsync();
+    }
+    if (field == SettingField::WindowPosition)
+    {
+        positionWindow();
     }
     invalidate();
 }
@@ -1273,6 +1439,26 @@ void showTrayMenu(HWND hwnd)
 
 void handlePaletteKey(WPARAM key)
 {
+    if (g_app.actionMenu && !ctrlDown() && !altDown())
+    {
+        const wchar_t shortcut = static_cast<wchar_t>(std::towupper(static_cast<wchar_t>(key)));
+        if (std::iswalnum(shortcut))
+        {
+            for (int i = 0; i < static_cast<int>(g_app.results.size()); ++i)
+            {
+                const Command& action = g_app.results[static_cast<size_t>(i)].command;
+                if (action.kind == CommandKind::Action && action.shortcutKey == shortcut)
+                {
+                    const Command command = action;
+                    g_app.selected = i;
+                    g_app.suppressNextCharacter = true;
+                    executeCommand(command);
+                    return;
+                }
+            }
+        }
+    }
+
     switch (key)
     {
     case VK_ESCAPE:
@@ -1381,7 +1567,18 @@ void handleSettingsKey(WPARAM key)
         return;
     }
 
-    const auto& rows = settingRows();
+    const auto& rows = activeSettingRows();
+
+    if (ctrlDown() && key == VK_PRIOR)
+    {
+        switchSettingsSection(g_app.settingsSection - 1);
+        return;
+    }
+    if (ctrlDown() && key == VK_NEXT)
+    {
+        switchSettingsSection(g_app.settingsSection + 1);
+        return;
+    }
     switch (key)
     {
     case VK_ESCAPE:
@@ -1401,7 +1598,7 @@ void handleSettingsKey(WPARAM key)
         {
             return;
         }
-        g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, -1);
+        g_app.settingsSelected = nextSelectableRow(rows, g_app.settingsSelected, -1);
         scrollSettingsSelectionIntoView();
         invalidate();
         return;
@@ -1412,7 +1609,7 @@ void handleSettingsKey(WPARAM key)
         {
             return;
         }
-        g_app.settingsSelected = nextSelectableRow(g_app.settingsSelected, 1);
+        g_app.settingsSelected = nextSelectableRow(rows, g_app.settingsSelected, 1);
         scrollSettingsSelectionIntoView();
         invalidate();
         return;
@@ -1498,7 +1695,8 @@ void refreshResults()
         clearTransientStatus();
     }
 
-    // The window shrinks to fit, so a two-result query does not leave a tall gap.
+    // Resize to fit while positionWindow keeps the query field's top edge anchored;
+    // result changes therefore grow and shrink only below the typing area.
     if (g_app.visible && g_app.results.size() != previousCount)
     {
         positionWindow();
@@ -1528,12 +1726,14 @@ void positionWindow()
     // on the DPI actually in effect before committing to a size.
     for (int pass = 0; pass < 2; ++pass)
     {
+        const Settings settings = getSettingsSnapshot();
         const float heightDip = g_app.mode == UiMode::Settings
             ? metrics::settingsHeight
             : paletteHeightForRows(static_cast<int>(g_app.results.size()), paletteUsesDetailRows());
 
         const int workWidth = std::max<int>(1, info.rcWork.right - info.rcWork.left);
-        const int preferredWidth = dipToPx(metrics::windowWidth, dpi);
+        const float widthDip = g_app.mode == UiMode::Settings ? metrics::settingsWindowWidth : metrics::windowWidth;
+        const int preferredWidth = dipToPx(widthDip, dpi);
         const int horizontalMargin = std::min(workWidth - 1, std::max(0, dipToPx(24.0f, dpi)));
         const int availableWidth = std::max(1, workWidth - horizontalMargin);
         const int width = std::min(preferredWidth, availableWidth);
@@ -1541,15 +1741,44 @@ void positionWindow()
         const int minHeight = dipToPx(180.0f, dpi);
         const int height = std::clamp(dipToPx(heightDip, dpi), minHeight, std::max(minHeight, maxHeight));
 
+        const int workHeight = std::max<int>(1, info.rcWork.bottom - info.rcWork.top);
         const int x = info.rcWork.left + std::max(0, (workWidth - width) / 2);
-        const int y = info.rcWork.top + dipToPx(96.0f, dpi);
-        SetWindowPos(g_app.hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+        const WindowPosition position = settings.windowPosition;
+        const int centerY = position == WindowPosition::Upper
+            ? info.rcWork.top + workHeight / 4
+            : info.rcWork.top + workHeight / 2;
+        int y = 0;
+        int placedHeight = height;
+        if (g_app.mode == UiMode::Palette)
+        {
+            if (!g_app.paletteTopAnchorValid || g_app.paletteAnchorMonitor != monitor)
+            {
+                const int anchorHeight = std::clamp(
+                    dipToPx(paletteHeightForRows(settings.maxResults, paletteUsesDetailRows()), dpi),
+                    minHeight, std::max(minHeight, maxHeight));
+                g_app.paletteTopAnchor = std::clamp(
+                    centerY - anchorHeight / 2,
+                    static_cast<int>(info.rcWork.top),
+                    static_cast<int>(info.rcWork.bottom) - anchorHeight);
+                g_app.paletteAnchorMonitor = monitor;
+                g_app.paletteTopAnchorValid = true;
+            }
+            y = g_app.paletteTopAnchor;
+            placedHeight = std::min(height, std::max(minHeight, static_cast<int>(info.rcWork.bottom) - y));
+        }
+        else
+        {
+            y = std::clamp(centerY - height / 2, static_cast<int>(info.rcWork.top),
+                           static_cast<int>(info.rcWork.bottom) - height);
+        }
+        SetWindowPos(g_app.hwnd, HWND_TOPMOST, x, y, width, placedHeight, SWP_NOACTIVATE);
 
         const UINT actual = GetDpiForWindow(g_app.hwnd);
         if (actual == 0 || actual == dpi)
         {
             break;
         }
+        g_app.paletteTopAnchorValid = false;
         dpi = actual;
     }
 
@@ -1571,6 +1800,8 @@ void positionWindow()
 void showPalette()
 {
     rememberPreviousForeground();
+    g_app.paletteTopAnchorValid = false;
+    g_app.paletteAnchorMonitor = nullptr;
     g_app.visible = true;
     g_app.mode = UiMode::Palette;
     g_app.actionMenu = false;
@@ -1600,6 +1831,8 @@ void showPalette()
 void showProviderPalette(const std::wstring& providerId)
 {
     rememberPreviousForeground();
+    g_app.paletteTopAnchorValid = false;
+    g_app.paletteAnchorMonitor = nullptr;
     g_app.visible = true;
     g_app.mode = UiMode::Palette;
     g_app.actionMenu = false;
@@ -1629,21 +1862,26 @@ void showProviderPalette(const std::wstring& providerId)
 void showSettings()
 {
     rememberPreviousForeground();
+    g_app.paletteTopAnchorValid = false;
+    g_app.paletteAnchorMonitor = nullptr;
     g_app.visible = true;
     g_app.mode = UiMode::Settings;
     g_app.forcedProviderId.clear();
     g_app.hovered = -1;
     g_app.settingsHovered = -1;
+    g_app.settingsSection = 0;
+    g_app.settingsSectionHovered = -1;
+    g_app.pressedSettingsSection = -1;
     g_app.pressedRow = -1;
     g_app.pressedPart = PressedPart::None;
     cancelNumberEdit();
     cancelPrefixEdit();
 
-    const auto& rows = settingRows();
+    const auto& rows = activeSettingRows();
     if (g_app.settingsSelected < 0 || g_app.settingsSelected >= static_cast<int>(rows.size()) ||
         rows[static_cast<size_t>(g_app.settingsSelected)].isHeader)
     {
-        g_app.settingsSelected = firstSelectableRow();
+        g_app.settingsSelected = firstSelectableRow(rows);
     }
 
     refreshTheme();
@@ -1802,7 +2040,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_ACTIVATE:
         if (LOWORD(wParam) == WA_INACTIVE && g_app.visible)
         {
-            hidePalette();
+            // Owned provider prompts are part of the QuickPal interaction. Keep the
+            // palette visible behind them; ordinary app switching still dismisses it.
+            const HWND activated = reinterpret_cast<HWND>(lParam);
+            const bool ownedPrompt = activated && GetWindow(activated, GW_OWNER) == hwnd;
+            if (!ownedPrompt)
+            {
+                hidePalette();
+            }
         }
         return 0;
 
@@ -1935,7 +2180,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     invalidate();
                     return 0;
                 case L'K':
-                    showActionsForSelected();
+                    if (!g_app.actionMenu)
+                    {
+                        showActionsForSelected();
+                    }
                     return 0;
                 case L'C':
                     if (g_app.editor.hasSelection())
@@ -1983,6 +2231,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CHAR:
     {
         const wchar_t ch = static_cast<wchar_t>(wParam);
+        if (g_app.suppressNextCharacter)
+        {
+            g_app.suppressNextCharacter = false;
+            return 0;
+        }
         if (ch < 32 || ch == 127 || ctrlDown())
         {
             return 0;
@@ -2000,7 +2253,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 return 0;
             }
-            const auto& rows = settingRows();
+            const auto& rows = activeSettingRows();
             const int index = g_app.settingsSelected;
             if (std::iswdigit(ch) && index >= 0 && index < static_cast<int>(rows.size()) &&
                 !rows[index].isHeader && rows[index].item.kind == SettingKind::Stepper)
@@ -2021,7 +2274,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (g_app.actionMenu)
         {
-            leaveActionMenu(false);
+            return 0;
         }
         g_app.editor.insertChar(ch);
         g_app.selected = 0;
@@ -2064,9 +2317,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             const SettingsLayout layout = buildSettingsLayout();
             const SettingsHit hit = hitTestSettings(layout, point.x, point.y);
-            if (hit.row != g_app.settingsHovered)
+            if (hit.row != g_app.settingsHovered || hit.section != g_app.settingsSectionHovered)
             {
                 g_app.settingsHovered = hit.row;
+                g_app.settingsSectionHovered = hit.section;
                 invalidate();
             }
         }
@@ -2098,6 +2352,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_app.mouseTracking = false;
         g_app.hovered = -1;
         g_app.settingsHovered = -1;
+        g_app.settingsSectionHovered = -1;
         invalidate();
         return 0;
 
@@ -2125,7 +2380,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             const SettingsLayout layout = buildSettingsLayout();
             const SettingsHit hit = hitTestSettings(layout, point.x, point.y);
-            if (hit.row >= 0)
+            if (hit.section >= 0)
+            {
+                g_app.pressedSettingsSection = hit.section;
+                g_app.pressedPart = PressedPart::SettingsSection;
+                SetCapture(hwnd);
+                invalidate();
+            }
+            else if (hit.row >= 0)
             {
                 if (g_app.settingsSelected != hit.row)
                 {
@@ -2187,9 +2449,26 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             const int pressedRow = g_app.pressedRow;
             const PressedPart pressedPart = g_app.pressedPart;
             const int pressedSegment = g_app.pressedSegment;
+            const int pressedSection = g_app.pressedSettingsSection;
             g_app.pressedRow = -1;
             g_app.pressedPart = PressedPart::None;
             g_app.pressedSegment = -1;
+            g_app.pressedSettingsSection = -1;
+
+            const SettingsLayout layout = buildSettingsLayout();
+            const SettingsHit hit = hitTestSettings(layout, point.x, point.y);
+            if (pressedPart == PressedPart::SettingsSection)
+            {
+                if (hit.section == pressedSection)
+                {
+                    switchSettingsSection(pressedSection);
+                }
+                else
+                {
+                    invalidate();
+                }
+                return 0;
+            }
 
             if (pressedRow < 0)
             {
@@ -2197,8 +2476,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
 
-            const SettingsLayout layout = buildSettingsLayout();
-            const SettingsHit hit = hitTestSettings(layout, point.x, point.y);
             // Only act when the release lands on the same control that was pressed.
             if (hit.row != pressedRow || hit.part != pressedPart || hit.segment != pressedSegment)
             {
@@ -2206,7 +2483,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
 
-            const auto& rows = settingRows();
+            const auto& rows = activeSettingRows();
             switch (pressedPart)
             {
             case PressedPart::Toggle:

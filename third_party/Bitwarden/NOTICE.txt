@@ -1,0 +1,23 @@
+QuickPal Bitwarden CLI fork 2026.8.0
+
+QuickPal distributes a source-built Windows x64 Bitwarden CLI executable as a
+separate program and communicates with it through the command-line and local
+Vault Management API interfaces. The fork adds authenticated local transport
+for QuickPal; it does not change Bitwarden vault cryptography.
+
+Fork source:
+https://github.com/TheItalianGame/quickpal-bitwarden
+
+Pinned commit:
+2e4b1fba6e02ca9822043ba89deb8809468e0b7b
+
+Upstream source/tag:
+https://github.com/bitwarden/clients/tree/cli-v2026.8.0
+
+The generated executable's SHA-256 and exact build toolchain are recorded in
+PROVENANCE.json beside this notice. The forked executable is not signed by
+Bitwarden Inc. The accompanying LICENSE.txt, LICENSE_GPL.txt, and
+LICENSE_BITWARDEN.txt files are copied from the pinned source tree.
+
+Bitwarden is a trademark of Bitwarden Inc. QuickPal is not affiliated with or
+endorsed by Bitwarden Inc.

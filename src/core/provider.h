@@ -11,6 +11,9 @@
 struct SettingItem;
 struct SettingRow;
 
+using ProviderStatusReporter = void (*)(HWND window, const wchar_t* providerId,
+                                        const std::wstring& message);
+
 // ---------------------------------------------------------------------------
 // Provider API
 //
@@ -68,6 +71,15 @@ struct ProviderContext
     const Settings& settings;
     HWND window = nullptr;   // the palette window, for self-exclusion and clipboard ownership
     HWND previousWindow = nullptr;
+    ProviderStatusReporter statusReporter = nullptr;
+
+    void reportStatus(const wchar_t* providerId, const std::wstring& message) const
+    {
+        if (statusReporter)
+        {
+            statusReporter(window, providerId, message);
+        }
+    }
 };
 
 // Collects results, keeps them ordered, and enforces the max-results bound so
@@ -124,6 +136,10 @@ struct ProviderInfo
     // Also call query() when no prefix matched, so the provider can activate on
     // shape alone (the calculator does this via looksLikeMath).
     bool runsUnprefixed = false;
+
+    // Copy shown under this provider's title in the Settings section rail.
+    // The provider still owns the rows themselves through settings().
+    const wchar_t* settingsSummary = L"Shortcuts and provider controls";
 };
 
 class Provider

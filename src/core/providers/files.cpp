@@ -369,7 +369,22 @@ private:
 
             std::vector<FileResultEntry> entries;
             bool ok = false;
-            if (request.settings.useEverythingHttp && everythingHttpReady())
+            if (request.settings.useEverything && everythingReady())
+            {
+                auto reply = everythingClient().search(
+                    request.text, static_cast<DWORD>(request.limit));
+                if (reply.ok)
+                {
+                    entries = std::move(reply.entries);
+                    ok = true;
+                }
+                else
+                {
+                    setEverythingReady(false);
+                }
+            }
+
+            if (!ok && request.settings.useEverythingHttp && everythingHttpReady())
             {
                 const auto reply = everythingHttpClient().search(
                     everythingHttpSettingsFrom(request.settings), request.text, request.limit);
@@ -382,12 +397,6 @@ private:
                 {
                     setEverythingHttpReady(false);
                 }
-            }
-
-            if (!ok && everythingReady())
-            {
-                entries = everythingClient().search(request.text, static_cast<DWORD>(request.limit));
-                ok = true;
             }
 
             HWND notify = nullptr;
@@ -427,7 +436,7 @@ private:
     std::vector<FileResultEntry> completed_;
 };
 
-// Three backends, best first: Everything's HTTP server, then its SDK, then our own
+// Three backends, best first: Everything's SDK, then its HTTP server, then our own
 // bounded background walk.
 class FilesProvider : public Provider
 {
@@ -516,12 +525,12 @@ public:
                                       L"Shortcut", L"Open file search directly", info().id));
         out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
                                       L"Prefix", L"Typed alias for file search", info().id));
+        out.push_back(makeSettingItem(SettingField::UseEverything, SettingKind::Toggle,
+                                      L"Everything SDK", L"Fastest local file search through Everything64.dll"));
         out.push_back(makeSettingItem(SettingField::UseEverythingHttp, SettingKind::Toggle,
-                                      L"Everything HTTP API", L"Use Everything's local HTTP server first"));
+                                      L"Everything HTTP API", L"Use Everything's local HTTP server as fallback"));
         out.push_back(makeSettingItem(SettingField::EverythingHttpPort, SettingKind::Stepper,
                                       L"Everything HTTP port", L"Port from Tools > Options > HTTP Server"));
-        out.push_back(makeSettingItem(SettingField::UseEverything, SettingKind::Toggle,
-                                      L"Everything SDK", L"Use Everything64.dll when HTTP is not available"));
         out.push_back(makeSettingItem(SettingField::FallbackFileIndex, SettingKind::Toggle,
                                       L"Fallback index", L"Scan selected local folders if Everything is unavailable"));
         out.push_back(makeSettingItem(SettingField::IndexDefaultPaths, SettingKind::Toggle,

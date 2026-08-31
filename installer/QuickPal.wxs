@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Id="QuickPal.CommandPalette"
+      Name="QuickPal"
+      Manufacturer="QuickPal"
+      Version="$(AppVersion)"
+      UpgradeCode="CA7FF022-0415-47E6-B152-BED3999EEBA6"
+      Scope="perUser"
+      InstallerVersion="500"
+      Compressed="yes">
+
+    <SummaryInformation Description="QuickPal native command palette for Windows" />
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of QuickPal is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="QuickPalIcon" SourceFile="$(ReleaseRoot)\bin\QuickPal.exe" />
+    <Property Id="ARPPRODUCTICON" Value="QuickPalIcon" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="QuickPal">
+          <Directory Id="BINDIR" Name="bin">
+            <Component Id="QuickPalExecutable" Guid="AB16A1F0-689C-4DBC-B033-5C5C3A241F9F">
+              <File Id="QuickPalExe" Source="$(ReleaseRoot)\bin\QuickPal.exe">
+                <Shortcut
+                    Id="QuickPalStartMenuShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="QuickPal"
+                    Description="QuickPal native command palette"
+                    WorkingDirectory="BINDIR" />
+              </File>
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="QuickPalExecutable" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="EverythingSdk" Guid="5112BF71-4240-42D9-85A8-9E1CD421B1EB">
+              <File Id="Everything64Dll" Source="$(ReleaseRoot)\bin\Everything64.dll" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="EverythingSdk" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="BitwardenCli" Guid="F6D91A2E-1F4B-4D78-A462-8C78DA0CC71B">
+              <File Id="BitwardenCliExe" Source="$(ReleaseRoot)\bin\bw.exe" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="BitwardenCli" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="ChromeNativeHost" Guid="EC524218-49EE-4270-98E4-4F081CCBACFA">
+              <File Id="QuickPalChromeHostExe" Source="$(ReleaseRoot)\bin\QuickPalChromeHost.exe" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="ChromeNativeHost" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="ChromeExtensionArchive" Guid="6B4C7E23-3F92-476E-8171-F86B2D20855E">
+              <File Id="QuickPalChromeTabsExtensionZip" Source="$(ReleaseRoot)\bin\QuickPalChromeTabsExtension.zip" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="ChromeExtensionArchive" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+          </Directory>
+
+          <Directory Id="ChromeExtensionDir" Name="chrome-extension">
+            <Component Id="ChromeExtensionManifest" Guid="4D167253-7516-4D9E-9450-5AF259D7123A">
+              <File Id="ChromeManifestJson" Source="$(ReleaseRoot)\chrome-extension\manifest.json" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="ChromeExtensionManifest" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="ChromeExtensionWorker" Guid="0C5D90C2-6B33-43F1-A79C-A6DC2A74E237">
+              <File Id="ChromeServiceWorkerJs" Source="$(ReleaseRoot)\chrome-extension\service_worker.js" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="ChromeExtensionWorker" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="ChromeExtensionReadme" Guid="EF7DFCDB-6062-462A-AE73-20A6A92D003C">
+              <File Id="ChromeReadmeMd" Source="$(ReleaseRoot)\chrome-extension\README.md" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="ChromeExtensionReadme" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+          </Directory>
+
+          <Directory Id="LicenseDir" Name="licenses">
+            <Component Id="EverythingLicense" Guid="2CD64612-911D-47AB-9EFE-70E0319458F0">
+              <File Id="EverythingLicenseTxt" Source="$(ReleaseRoot)\licenses\Everything.txt" />
+              <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="EverythingLicense" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Directory Id="BitwardenLicenseDir" Name="Bitwarden">
+              <Component Id="BitwardenLicenses" Guid="0B47F4E0-A67F-4D99-A95B-69D252067C2C">
+                <File Id="BitwardenNoticeTxt" Source="$(ReleaseRoot)\licenses\Bitwarden\NOTICE.txt" />
+                <File Id="BitwardenLicenseTxt" Source="$(ReleaseRoot)\licenses\Bitwarden\LICENSE.txt" />
+                <File Id="BitwardenLicenseGplTxt" Source="$(ReleaseRoot)\licenses\Bitwarden\LICENSE_GPL.txt" />
+                <File Id="BitwardenLicenseCommercialTxt" Source="$(ReleaseRoot)\licenses\Bitwarden\LICENSE_BITWARDEN.txt" />
+                <File Id="BitwardenProvenanceJson" Source="$(ReleaseRoot)\licenses\Bitwarden\PROVENANCE.json" />
+                <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="BitwardenLicenses" Type="integer" Value="1" KeyPath="yes" />
+              </Component>
+            </Directory>
+          </Directory>
+
+          <Component Id="QuickPalReadme" Guid="40E38E75-99CD-45E2-A345-58EF08741070">
+            <File Id="QuickPalReadmeMd" Source="$(ReleaseRoot)\README.md" />
+            <RegistryValue Root="HKCU" Key="Software\QuickPal\InstallerComponents" Name="QuickPalReadme" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+          <Component Id="InstallRegistration" Guid="*">
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\QuickPal"
+                Name="InstallLocation"
+                Type="string"
+                Value="[INSTALLFOLDER]"
+                KeyPath="yes" />
+            <RemoveRegistryKey
+                Id="RemoveChromeNativeHostRegistration"
+                Root="HKCU"
+                Key="Software\Google\Chrome\NativeMessagingHosts\com.quickpal.tabs"
+                Action="removeOnUninstall" />
+            <RemoveFile
+                Id="RemoveChromeNativeHostManifest"
+                Directory="QuickPalSettingsFolder"
+                Name="com.quickpal.tabs.json"
+                On="uninstall" />
+            <RemoveFolder Id="RemoveBinDirectory" Directory="BINDIR" On="uninstall" />
+            <RemoveFolder Id="RemoveChromeExtensionDirectory" Directory="ChromeExtensionDir" On="uninstall" />
+            <RemoveFolder Id="RemoveBitwardenLicenseDirectory" Directory="BitwardenLicenseDir" On="uninstall" />
+            <RemoveFolder Id="RemoveLicenseDirectory" Directory="LicenseDir" On="uninstall" />
+            <RemoveFolder Id="RemoveInstallDirectory" Directory="INSTALLFOLDER" On="uninstall" />
+            <RemoveFolder Id="RemoveLocalProgramsDirectoryIfEmpty" Directory="LocalProgramsFolder" On="uninstall" />
+            <RemoveFolder Id="RemoveSettingsDirectoryIfEmpty" Directory="QuickPalSettingsFolder" On="uninstall" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="AppDataFolder">
+      <Directory Id="QuickPalSettingsFolder" Name="QuickPal" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="MainFeature" Title="QuickPal" Level="1">
+      <ComponentRef Id="QuickPalExecutable" />
+      <ComponentRef Id="EverythingSdk" />
+      <ComponentRef Id="BitwardenCli" />
+      <ComponentRef Id="ChromeNativeHost" />
+      <ComponentRef Id="ChromeExtensionArchive" />
+      <ComponentRef Id="ChromeExtensionManifest" />
+      <ComponentRef Id="ChromeExtensionWorker" />
+      <ComponentRef Id="ChromeExtensionReadme" />
+      <ComponentRef Id="EverythingLicense" />
+      <ComponentRef Id="BitwardenLicenses" />
+      <ComponentRef Id="QuickPalReadme" />
+      <ComponentRef Id="InstallRegistration" />
+    </Feature>
+  </Package>
+</Wix>

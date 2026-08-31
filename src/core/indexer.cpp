@@ -22,6 +22,8 @@ std::vector<Command> g_fileIndex;
 
 std::mutex g_statusMutex;
 std::wstring g_statusBase = L"Indexing commands...";
+std::wstring g_statusProviderId;
+std::wstring g_statusProvider;
 std::wstring g_statusTransient;
 
 std::atomic_bool g_rebuilding{ false };
@@ -252,6 +254,11 @@ bool everythingHttpReady()
     return g_everythingHttpReady.load();
 }
 
+void setEverythingReady(bool ready)
+{
+    g_everythingReady.store(ready);
+}
+
 void setEverythingHttpReady(bool ready)
 {
     g_everythingHttpReady.store(ready);
@@ -292,6 +299,26 @@ void setStatus(const std::wstring& value)
     notifyIndexChanged();
 }
 
+void setProviderStatus(const std::wstring& providerId, const std::wstring& value)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_statusMutex);
+        g_statusProviderId = providerId;
+        g_statusProvider = value.empty() ? L"" : providerId + L"  |  " + value;
+    }
+    notifyIndexChanged();
+}
+
+void clearProviderStatus(const std::wstring& providerId)
+{
+    std::lock_guard<std::mutex> lock(g_statusMutex);
+    if (providerId.empty() || providerId == g_statusProviderId)
+    {
+        g_statusProviderId.clear();
+        g_statusProvider.clear();
+    }
+}
+
 void setTransientStatus(const std::wstring& value)
 {
     std::lock_guard<std::mutex> lock(g_statusMutex);
@@ -307,7 +334,11 @@ void clearTransientStatus()
 std::wstring getStatus()
 {
     std::lock_guard<std::mutex> lock(g_statusMutex);
-    return g_statusTransient.empty() ? g_statusBase : g_statusTransient;
+    if (!g_statusTransient.empty())
+    {
+        return g_statusTransient;
+    }
+    return g_statusProvider.empty() ? g_statusBase : g_statusProvider;
 }
 
 std::wstring getBaseStatus()

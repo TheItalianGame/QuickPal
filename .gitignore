@@ -1,0 +1,6 @@
+dist/
+.deps/
+bin/QuickPalVersion.h
+bin/bw.exe
+third_party/Bitwarden/bw.exe
+third_party/Bitwarden/PROVENANCE.json

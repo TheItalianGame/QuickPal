@@ -19,6 +19,7 @@ Settings normalizedSettings(Settings settings);
 enum class SettingField
 {
     Appearance,
+    WindowPosition,
     UseSystemAccent,
     UseEverythingHttp,
     EverythingHttpPort,
@@ -36,11 +37,12 @@ enum class SettingField
     UseChromeTabs,
     BitwardenSearchUsernames,
     BitwardenUnlockWithPin,
+    BitwardenUnlockWithHello,
     BitwardenRequireMasterOnRestart,
     BitwardenUseServe,
     BitwardenLockOnSleep,
     BitwardenLockOnExit,
-    BitwardenSecretTimeoutSeconds,
+    BitwardenPinTimeoutSeconds,
     BitwardenClipboardClearSeconds,
     MaxResults,
     ShowLatency,
@@ -78,15 +80,27 @@ struct SettingRow
     SettingItem item;
 };
 
+// Settings are grouped into stable pages. General is first; every provider that
+// contributes rows owns one page selected from the right-side settings rail.
+struct SettingSection
+{
+    std::wstring id;
+    std::wstring title;
+    std::wstring subtitle;
+    std::vector<SettingRow> rows;
+};
+
 SettingRow makeSettingHeader(std::wstring text);
 SettingRow makeSettingItem(SettingField field, SettingKind kind, std::wstring title, std::wstring subtitle,
                            std::wstring providerId = L"", std::wstring settingKey = L"");
 
-const std::vector<SettingRow>& settingRows();
+const std::vector<SettingSection>& settingSections();
+const SettingSection& settingSection(int index);
+int settingSectionIndex(const std::wstring& id);
 
 // Index of the first selectable (non-header) row, and neighbour lookups that skip headers.
-int firstSelectableRow();
-int nextSelectableRow(int from, int direction);
+int firstSelectableRow(const std::vector<SettingRow>& rows);
+int nextSelectableRow(const std::vector<SettingRow>& rows, int from, int direction);
 
 bool isToggleSetting(SettingField field);
 bool isNumericSetting(SettingField field);
@@ -116,6 +130,7 @@ void setProviderShortcutValue(const std::wstring& providerId, const std::wstring
 std::wstring providerPrefixValue(const std::wstring& providerId);
 void setProviderPrefixValue(const std::wstring& providerId, const std::wstring& prefix);
 std::wstring providerPrefixConflict(const std::wstring& providerId, const std::wstring& prefix);
+void setBitwardenAccountEmail(const std::wstring& email);
 
 bool settingNeedsRebuild(SettingField field);
 bool settingNeedsRepaintOnly(SettingField field);

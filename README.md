@@ -5,7 +5,7 @@ QuickPal is a tiny native C++ command palette for Windows. It is built for low i
 - Win32/GDI UI, no Electron/Qt/WinUI startup cost.
 - Commands are indexed once into memory.
 - Each keystroke scores the in-memory index and keeps only the top results.
-- File search can use the Everything HTTP API, the Everything SDK DLL, or a bounded background fallback index for Desktop, Documents, Downloads, and optional default Windows locations.
+- File search prefers the low-latency Everything SDK DLL, falls back to the Everything HTTP API, and can use a bounded background index for Desktop, Documents, Downloads, and optional default Windows locations.
 - Chrome tab search uses a local Chrome extension and Native Messaging, with no debug port.
 - Windows Settings and window switching use Windows APIs/URI handlers.
 - Settings and tray management are native Win32 in the same process.
@@ -23,6 +23,30 @@ The executable is written to:
 ```text
 bin\QuickPal.exe
 ```
+
+## Release packages
+
+Build the portable x64 ZIP and per-user MSI installer with the Everything SDK runtime and QuickPal's pinned, source-built Bitwarden CLI fork bundled:
+
+```powershell
+.\package.ps1 -Version 0.1.0
+```
+
+Use `-SkipBuild` to package binaries that were already built, or `-SkipInstaller` when
+only the ZIP is needed. The artifacts are written under `dist\`. Both formats include
+`Everything64.dll`, the source-built `bw.exe`, their license/provenance notices, and the Chrome native host and extension;
+the portable ZIP also contains an internal `SHA256SUMS.txt`, while a release-level hash
+file covers both artifacts. The MSI installs per-user under `%LOCALAPPDATA%\Programs`,
+adds a Start Menu shortcut, supports major upgrades, and removes its Chrome native-host
+registration during uninstall without deleting QuickPal user settings.
+
+The MSI and portable ZIP bundle the SDK client DLL. Voidtools Everything must still be
+installed and running on the target computer for SDK-backed whole-machine search, but
+the user does not need to download or install the Everything SDK separately.
+
+`.github\workflows\package.yml` builds and uploads both packages on pushes and pull
+requests to `master`, supports manually supplied versions, and publishes the ZIP, MSI,
+and hashes to a GitHub Release when a numeric `v*` tag such as `v0.1.0` is pushed.
 
 The Chrome Native Messaging helper is written to:
 
@@ -43,18 +67,18 @@ bin\QuickPalBench.exe
 - Press `Alt+Q`, left-click the tray icon, or use the tray menu to open it.
 - Right-click the tray icon for Settings, Reload indexes, shell runner toggle, Everything HTTP/SDK toggles, and Exit.
 - Type normally to search indexed apps, PATH tools, settings, and built-ins.
-- `file <name>` or `f <name>` searches files through Everything HTTP, Everything SDK, or the fallback index. File rows show full path, size, and modified date.
+- `file <name>` or `f <name>` searches files through the Everything SDK, Everything HTTP, or the fallback index. File rows show full path, size, and modified date.
 - `Alt+E` opens the file search provider directly. Provider shortcuts and primary typed prefixes can be changed in Settings.
 - `?? <query>` opens a web search.
 - `> <command>` runs a shell command. PowerShell is the default runner; switch to cmd in Settings or the tray menu.
 - `= <expression>`, `calc <expression>`, or raw math like `23*47` calculates in-process and copies the result on Enter.
 - `win <title>` switches to an open window.
 - `tab <query>`, `tabs <query>`, or `chrome <query>` searches open Chrome tabs after the extension is installed.
-- `Ctrl+K` or right-click opens actions for the selected result. Actions include admin launch, containing folder, copy title/path/name/value, provider settings, tab close/reload, window snap/center/minimize/close, and clipboard pinning.
+- `Ctrl+K` or right-click opens actions for the selected result. Each action shows a unique single-key shortcut; press it to run immediately, or press Esc to return to the same search. Actions include admin launch, containing folder, copy title/path/name/value, provider settings, tab close/reload, window snap/center/minimize/close, and clipboard pinning.
 - `v <query>`, `clip <query>`, or `clipboard <query>` searches clipboard history. Enter pastes plain text back into the app that was active before QuickPal opened. Pinned clipboard items are stored in `%APPDATA%\QuickPal\clipboard_pins.tsv`.
 - `; <query>`, `snip <query>`, or `snippet <query>` searches snippets. Snippets live in `%APPDATA%\QuickPal\snippets.ini`; Settings has an Edit snippets action. `{date}`, `{time}`, and `{datetime}` expand at paste time.
 - `ql <alias> <query>` or bare quicklinks like `gh windows api` open user-defined quicklinks from `%APPDATA%\QuickPal\quicklinks.ini`. Settings has an Edit quicklinks action.
-- `pw <query>` searches Bitwarden metadata after you sync it. Enter opens the saved site. `Ctrl+K` or right-click exposes Copy username, Copy password, Copy TOTP, Open site, and Open in Bitwarden.
+- `pw <query>` searches Bitwarden metadata after you sync it. Enter copies the password. `Ctrl+K` or right-click opens immediately with Copy username, Copy password, Open site, and Open in Bitwarden; Copy TOTP appears only when that item has TOTP configured.
 - `guid` generates a UUID. `base64 <text>`, `from64 <text>`, `sha256 <text>`, `sha1 <text>`, and `md5 <text>` generate values locally and copy them on Enter.
 - Built-in system commands include Sleep PC, Restart PC, Shut down PC, Sign out, and Empty Recycle Bin.
 - `Ctrl+,` opens Settings.
@@ -63,7 +87,10 @@ bin\QuickPalBench.exe
 
 ## Everything SDK
 
-For whole-machine indexed file search, install Voidtools Everything and place `Everything64.dll` beside `QuickPal.exe`, somewhere on `PATH`, or in `C:\Program Files\Everything\`. QuickPal dynamically loads it at runtime; it does not require the SDK to build.
+For whole-machine indexed file search, install Voidtools Everything. QuickPal release
+packages already place `Everything64.dll` beside `QuickPal.exe`; manual source or portable
+layouts may instead place it there, somewhere on `PATH`, or in `C:\Program Files\Everything\`.
+QuickPal dynamically loads it at runtime; it does not require the SDK to compile.
 
 The normal Everything app installer may not include `Everything64.dll`; the SDK ZIP from Voidtools does.
 
@@ -90,11 +117,13 @@ Chrome tab actions also use the same Native Messaging bridge for close and reloa
 
 ## Bitwarden
 
-Bitwarden search uses `bw.exe` directly. It does not use PowerShell, cmd, or `bw serve` by default. If `bw.exe` is missing, `pw` shows an install action that opens the official Bitwarden CLI docs.
+QuickPal builds and bundles the pinned [`TheItalianGame/quickpal-bitwarden`](https://github.com/TheItalianGame/quickpal-bitwarden) fork at commit `2e4b1fba6e02ca9822043ba89deb8809468e0b7b`. The build verifies the clean source commit, CLI version, secure-serve options, and generated executable provenance before packaging it. It starts `bw serve` on `127.0.0.1` with a randomized high port and a fresh 256-bit bearer token only while secrets are authorized. The token is generated automatically, passed only through the child environment, cleared by the server after startup, included on every request, and never appears in Settings or command-line arguments. Bitwarden's Host and Origin protections remain enabled. The child process runs in a Windows kill-on-close job and also has an independent deadline watcher, so it stops on PIN expiry, lock, sleep, normal exit, forced exit, or crash. **Fast local API** is enabled by default and the direct CLI remains an automatic fallback.
 
-QuickPal only keeps searchable metadata in its Bitwarden cache: item name, primary domain, folder, vault, and username when **Search usernames** is enabled. It does not index or store passwords, TOTP seeds/codes, notes, recovery codes, or custom fields. Secret actions call `bw get username`, `bw get password`, or `bw get totp` only when selected from the actions menu.
+QuickPal's searchable cache contains item name, primary domain, folder, vault, and username when **Search usernames** is enabled. During an authorized secret window, the already-decrypted vault read also keeps passwords in process memory so Enter and Ctrl+K copies do not launch another Bitwarden request. Password memory is zeroed on lock and when QuickPal observes authorization expiry; it is never written to disk. TOTP seeds/codes, notes, recovery codes, and custom fields are not stored. TOTP is generated by Bitwarden only when requested.
 
-The first secret action requires your Bitwarden master password and stores only the returned `BW_SESSION` key in memory until **Secret timeout** expires. With **Unlock with PIN** enabled, QuickPal asks for a local PIN during that active session window; failed attempts get a short backoff. **Master password on restart** defaults on, so QuickPal does not persist the session between app launches.
+The first secret action requires your Bitwarden master password and stores only the returned `BW_SESSION` key in memory. A successful sign-in authorizes the fixed **Secret authorization** window (15 minutes by default), so QuickPal does not immediately ask again. **Unlock secrets with PIN** uses the PIN set explicitly in Settings; the salted PBKDF2 verifier is protected with Windows DPAPI and persists independently of Bitwarden sessions, while the PIN itself is never stored. **Unlock with Windows Hello** is an alternative using the native Windows face, fingerprint, or device-PIN prompt, with the QuickPal PIN as an optional fallback. Five incorrect QuickPal PIN attempts lock the Bitwarden session. **Master password after restart** defaults on, so QuickPal does not persist the Bitwarden session between app launches.
+
+**Connect Bitwarden** normally reads Bitwarden's existing encrypted local vault cache without waiting for a cloud refresh. A genuinely new login performs one initial sync. Later cloud refreshes are explicit through **Sync metadata** in Settings or the sync result shown when a `pw` search has no matches; after syncing, QuickPal keeps the current search open and refreshes its results.
 
 Secret clipboard writes use Windows clipboard history/cloud exclusion formats and clear the clipboard after **Clipboard clear** seconds if the value is unchanged.
 

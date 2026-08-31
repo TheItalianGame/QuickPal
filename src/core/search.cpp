@@ -172,14 +172,15 @@ SearchOutput runSearch(const std::wstring& rawQuery, const Settings& settings, H
     return out;
 }
 
-bool executeThroughProvider(const Command& command, const Settings& settings, HWND self, HWND previousWindow)
+bool executeThroughProvider(const Command& command, const Settings& settings, HWND self,
+                            HWND previousWindow, ProviderStatusReporter statusReporter)
 {
     Provider* provider = ProviderRegistry::instance().byId(command.provider);
     if (!provider)
     {
         return false;
     }
-    const ProviderContext ctx{ settings, self, previousWindow };
+    const ProviderContext ctx{ settings, self, previousWindow, statusReporter };
     return provider->execute(ctx, command);
 }
 

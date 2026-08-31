@@ -582,12 +582,12 @@ std::wstring EverythingSdkClient::loadedPath() const
     return loadedPath_;
 }
 
-std::vector<FileResultEntry> EverythingSdkClient::search(const std::wstring& query, DWORD maxResults)
+EverythingSdkSearchResult EverythingSdkClient::search(const std::wstring& query, DWORD maxResults)
 {
-    std::vector<FileResultEntry> entries;
+    EverythingSdkSearchResult result;
     if (!loaded_ || query.empty())
     {
-        return entries;
+        return result;
     }
 
     constexpr DWORD requestFullPath = 0x00000004;
@@ -599,11 +599,11 @@ std::vector<FileResultEntry> EverythingSdkClient::search(const std::wstring& que
 
     if (!query_(TRUE))
     {
-        return entries;
+        return result;
     }
 
     const DWORD count = std::min<DWORD>(getNumResults_(), maxResults);
-    entries.reserve(count);
+    result.entries.reserve(count);
     for (DWORD i = 0; i < count; ++i)
     {
         wchar_t buffer[32768]{};
@@ -637,10 +637,11 @@ std::vector<FileResultEntry> EverythingSdkClient::search(const std::wstring& que
             entry.modifiedText = formatFileTime(modified);
         }
 
-        entries.push_back(std::move(entry));
+        result.entries.push_back(std::move(entry));
     }
 
-    return entries;
+    result.ok = true;
+    return result;
 }
 
 EverythingHttpClient::EverythingHttpClient()

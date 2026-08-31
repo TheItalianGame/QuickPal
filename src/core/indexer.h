@@ -14,9 +14,11 @@ void rebuildIndexAsync();
 void buildFileIndexAsync();
 void rebuildIndexBlocking(bool includeFallbackFileIndex = false);
 
-// Status has two layers: a stable base written by the indexers, and a transient
-// line the search path overlays with per-keystroke timing.
+// Status has three layers: a stable index base, a provider-owned operation line,
+// and a transient UI line. The most specific non-empty layer is painted.
 void setStatus(const std::wstring& value);
+void setProviderStatus(const std::wstring& providerId, const std::wstring& value);
+void clearProviderStatus(const std::wstring& providerId = {});
 void setTransientStatus(const std::wstring& value);
 void clearTransientStatus();
 std::wstring getStatus();
@@ -24,8 +26,9 @@ std::wstring getBaseStatus();
 
 bool everythingReady();
 bool everythingHttpReady();
-// The search path clears this when a live query fails, so a server that goes away
+// The search path clears a backend when a live query fails, so one that goes away
 // mid-session falls back instead of retrying every keystroke.
+void setEverythingReady(bool ready);
 void setEverythingHttpReady(bool ready);
 bool fileIndexing();
 int staticCommandCount();

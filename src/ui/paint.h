@@ -11,6 +11,8 @@ D2D1_SIZE_F clientSizeDip();
 // leave clicks pointing at where things used to be drawn.
 PaletteLayout buildPaletteLayout();
 SettingsLayout buildSettingsLayout();
+const SettingSection& activeSettingSection();
+const std::vector<SettingRow>& activeSettingRows();
 
 // Draws one frame. Handles device loss internally; returns false if the device
 // could not be (re)created.

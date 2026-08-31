@@ -127,6 +127,7 @@ const wchar_t* actionHint(CommandKind kind)
     case CommandKind::ChromeTab: return L"Focus";
     case CommandKind::Snippet: return L"Paste";
     case CommandKind::ValueTool: return L"Copy";
+    case CommandKind::BitwardenItem: return L"Copy password";
     case CommandKind::Action: return L"Do";
     default: return L"Open";
     }
@@ -363,7 +364,14 @@ void paintPalette(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, cons
             drawText(rt, gfx, command.data, r.detail, TextStyle{ FontRole::Hint, theme.textMuted });
         }
 
-        if (selected)
+        if (command.kind == CommandKind::Action && command.shortcutKey != 0)
+        {
+            const std::wstring shortcut = std::wstring(L"[") + command.shortcutKey + L"]";
+            drawText(rt, gfx, shortcut, r.hint,
+                     TextStyle{ FontRole::Hint, selected ? theme.accent : theme.textMuted,
+                                DWRITE_TEXT_ALIGNMENT_TRAILING });
+        }
+        else if (selected)
         {
             drawText(rt, gfx, actionHint(command.kind), r.hint,
                      TextStyle{ FontRole::Hint, theme.textMuted, DWRITE_TEXT_ALIGNMENT_TRAILING });
@@ -378,20 +386,52 @@ void paintPalette(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, cons
 
     fill(rt, gfx, layout.footer, theme.footerBg);
     drawText(rt, gfx, getStatus(), layout.statusText, TextStyle{ FontRole::Hint, theme.textMuted });
-    drawText(rt, gfx, L"↑↓ move  ·  ↵ run  ·  Ctrl+K actions", layout.footerHint,
+    const wchar_t* footerHint = g_app.actionMenu
+        ? L"Type shortcut  ·  ↑↓ move  ·  Esc back"
+        : L"↑↓ move  ·  ↵ run  ·  Ctrl+K actions";
+    drawText(rt, gfx, footerHint, layout.footerHint,
              TextStyle{ FontRole::Hint, theme.textMuted, DWRITE_TEXT_ALIGNMENT_TRAILING });
 }
 
 void paintSettings(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, const SettingsLayout& layout)
 {
     const Settings settings = getSettingsSnapshot();
-    const auto& rows = settingRows();
+    const auto& sections = settingSections();
+    const SettingSection& section = activeSettingSection();
+    const auto& rows = section.rows;
 
     fill(rt, gfx, layout.header, theme.headerBg);
     fill(rt, gfx, layout.divider, theme.divider);
-    drawText(rt, gfx, L"QuickPal settings", layout.titleText, TextStyle{ FontRole::Query, theme.textPrimary });
-    drawText(rt, gfx, L"Index providers, appearance, and latency controls", layout.subtitleText,
+    drawText(rt, gfx, section.title, layout.titleText, TextStyle{ FontRole::Query, theme.textPrimary });
+    drawText(rt, gfx, section.subtitle, layout.subtitleText,
              TextStyle{ FontRole::SettingSubtitle, theme.textSecondary });
+
+    fill(rt, gfx, layout.rail, theme.headerBg);
+    fill(rt, gfx, layout.railDivider, theme.divider);
+    drawText(rt, gfx, L"SECTIONS", layout.railTitle, TextStyle{ FontRole::SectionHeader, theme.textMuted });
+    for (size_t i = 0; i < layout.railRows.size() && i < sections.size(); ++i)
+    {
+        const bool selected = static_cast<int>(i) == g_app.settingsSection;
+        const bool hovered = static_cast<int>(i) == g_app.settingsSectionHovered;
+        const bool pressed = g_app.pressedPart == PressedPart::SettingsSection &&
+                             g_app.pressedSettingsSection == static_cast<int>(i);
+        if (selected)
+        {
+            fillRounded(rt, gfx, layout.railRows[i], 7.0f, theme.accentSoft);
+        }
+        else if (pressed)
+        {
+            fillRounded(rt, gfx, layout.railRows[i], 7.0f, theme.controlPressed);
+        }
+        else if (hovered)
+        {
+            fillRounded(rt, gfx, layout.railRows[i], 7.0f, theme.rowHover);
+        }
+        const D2D1_RECT_F label{ layout.railRows[i].left + 10.0f, layout.railRows[i].top,
+                                 layout.railRows[i].right - 10.0f, layout.railRows[i].bottom };
+        drawText(rt, gfx, sections[i].title, label,
+                 TextStyle{ FontRole::SettingTitle, selected ? theme.accent : theme.textSecondary });
+    }
 
     rt->PushAxisAlignedClip(layout.listArea, D2D1_ANTIALIAS_MODE_ALIASED);
 
@@ -511,7 +551,7 @@ void paintSettings(ID2D1RenderTarget* rt, Graphics& gfx, const Theme& theme, con
 
     fill(rt, gfx, layout.footer, theme.footerBg);
     drawText(rt, gfx, getStatus(), layout.statusText, TextStyle{ FontRole::Hint, theme.textMuted });
-    std::wstring hint = L"↑↓ move  ·  ←→ adjust  ·  ↵ apply  ·  Esc close";
+    std::wstring hint = L"↑↓ move  ·  Ctrl+PgUp/PgDn section  ·  Esc close";
     if (g_app.editingPrefix)
     {
         hint = L"Type prefix  ·  ↵ save  ·  Del reset  ·  Esc cancel";
@@ -544,7 +584,18 @@ PaletteLayout buildPaletteLayout()
 SettingsLayout buildSettingsLayout()
 {
     const D2D1_SIZE_F size = clientSizeDip();
-    return computeSettingsLayout(size.width, size.height, settingRows(), g_app.settingsScroll);
+    return computeSettingsLayout(size.width, size.height, activeSettingRows(), g_app.settingsScroll,
+                                 static_cast<int>(settingSections().size()));
+}
+
+const SettingSection& activeSettingSection()
+{
+    return settingSection(g_app.settingsSection);
+}
+
+const std::vector<SettingRow>& activeSettingRows()
+{
+    return activeSettingSection().rows;
 }
 
 bool paintFrame()

@@ -38,6 +38,12 @@ struct EverythingHttpSearchResult
     std::vector<FileResultEntry> entries;
 };
 
+struct EverythingSdkSearchResult
+{
+    bool ok = false;
+    std::vector<FileResultEntry> entries;
+};
+
 std::wstring formatFileSize(ULONGLONG bytes);
 std::wstring formatFileTime(const FILETIME& fileTime);
 FileResultEntry fileEntryFromPath(const std::wstring& path);
@@ -49,7 +55,7 @@ public:
     bool load();
     bool loaded() const;
     std::wstring loadedPath() const;
-    std::vector<FileResultEntry> search(const std::wstring& query, DWORD maxResults);
+    EverythingSdkSearchResult search(const std::wstring& query, DWORD maxResults);
 
 private:
     using SetSearchFn = void(WINAPI*)(LPCWSTR);

@@ -22,6 +22,7 @@ enum class PressedPart
     Plus,
     Segment,
     Action,
+    SettingsSection,
 };
 
 struct AppState
@@ -44,11 +45,14 @@ struct AppState
     int hovered = -1;
 
     bool actionMenu = false;
+    bool suppressNextCharacter = false;
     Command actionTarget;
     std::wstring actionReturnText;
 
     int settingsSelected = 0;
     int settingsHovered = -1;
+    int settingsSection = 0;
+    int settingsSectionHovered = -1;
     float settingsScroll = 0.0f;
 
     // Inline numeric entry: typing digits on a stepper row edits the value directly
@@ -64,6 +68,7 @@ struct AppState
     int pressedRow = -1;
     PressedPart pressedPart = PressedPart::None;
     int pressedSegment = -1;
+    int pressedSettingsSection = -1;
     int pressedPaletteRow = -1;
     bool draggingText = false;
 
@@ -74,6 +79,9 @@ struct AppState
 
     NOTIFYICONDATAW tray{};
     float windowHeightDip = 0.0f;
+    bool paletteTopAnchorValid = false;
+    LONG paletteTopAnchor = 0;
+    HMONITOR paletteAnchorMonitor = nullptr;
     bool mouseTracking = false;
 };
 

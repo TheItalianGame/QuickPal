@@ -12,6 +12,7 @@
 namespace metrics
 {
 constexpr float windowWidth = 720.0f;
+constexpr float settingsWindowWidth = 900.0f;
 
 constexpr float headerHeight = 74.0f;
 constexpr float listTop = 82.0f;
@@ -33,6 +34,8 @@ constexpr float settingsSectionHeight = 38.0f;
 constexpr float settingsItemHeight = 54.0f;
 constexpr float settingsHeight = 640.0f;
 constexpr float settingsControlWidth = 200.0f;
+constexpr float settingsRailWidth = 190.0f;
+constexpr float settingsRailRowHeight = 29.0f;
 
 constexpr float scrollBarWidth = 4.0f;
 constexpr float scrollBarInset = 5.0f;
@@ -97,6 +100,10 @@ struct SettingsLayout
     D2D1_RECT_F statusText{};
     D2D1_RECT_F footerHint{};
     D2D1_RECT_F scrollThumb{};
+    D2D1_RECT_F rail{};
+    D2D1_RECT_F railDivider{};
+    D2D1_RECT_F railTitle{};
+    std::vector<D2D1_RECT_F> railRows;
     bool showScrollbar = false;
     // Already offset by scrollY, so painting and hit-testing share coordinates.
     std::vector<SettingsRowRects> rows;
@@ -105,7 +112,8 @@ struct SettingsLayout
 float paletteHeightForRows(int rowCount, bool detailRows = false);
 
 PaletteLayout computePaletteLayout(float width, float height, int rowCount, bool detailRows = false);
-SettingsLayout computeSettingsLayout(float width, float height, const std::vector<SettingRow>& rows, float scrollY);
+SettingsLayout computeSettingsLayout(float width, float height, const std::vector<SettingRow>& rows,
+                                     float scrollY, int sectionCount);
 
 // Scroll offset needed to bring a row fully inside the settings list viewport.
 float settingsScrollToReveal(const SettingsLayout& layout, int rowIndex, float currentScroll);

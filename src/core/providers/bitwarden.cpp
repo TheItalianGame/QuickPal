@@ -2,18 +2,29 @@
 
 #include "../settings.h"
 #include "../util.h"
+#include "../../ui/theme.h"
 
 #include <bcrypt.h>
+#include <asyncinfo.h>
 #include <shellapi.h>
 #include <wincrypt.h>
+#include <winhttp.h>
+#include <winstring.h>
+#include <roapi.h>
+#include <windows.foundation.h>
+#include <windows.security.credentials.ui.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <mutex>
+#include <limits>
 #include <optional>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 
 namespace fs = std::filesystem;
@@ -21,10 +32,17 @@ namespace fs = std::filesystem;
 namespace
 {
 constexpr DWORD kBwTimeoutMs = 30000;
+constexpr DWORD kBwUnlockTimeoutMs = 120000;
 constexpr DWORD kBwListTimeoutMs = 90000;
+constexpr DWORD kBwServeStartTimeoutMs = 12000;
+constexpr DWORD kBwServeRequestTimeoutMs = 5000;
 constexpr wchar_t kProviderId[] = L"bitwarden";
 constexpr wchar_t kInstallUrl[] = L"https://bitwarden.com/help/cli/";
 constexpr wchar_t kDefaultVaultUrl[] = L"https://vault.bitwarden.com";
+constexpr GUID kUserConsentVerifierStaticsId =
+    { 0xaf4f3f91, 0x564c, 0x4ddc, { 0xb8, 0xb5, 0x97, 0x34, 0x47, 0x62, 0x7c, 0x65 } };
+constexpr GUID kAsyncInfoId =
+    { 0x00000036, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 
 ULONGLONG currentTimeMs()
 {
@@ -45,6 +63,32 @@ struct BwProcessResult
     std::wstring output;
 };
 
+struct BwHttpResult
+{
+    bool sent = false;
+    DWORD statusCode = 0;
+    std::wstring output;
+
+    bool ok() const
+    {
+        return sent && statusCode >= 200 && statusCode < 300;
+    }
+};
+
+struct BwServeProcess
+{
+    HANDLE process = nullptr;
+    HANDLE job = nullptr;
+    DWORD processId = 0;
+};
+
+struct BwServeWatchState
+{
+    HANDLE process = nullptr;
+    HANDLE job = nullptr;
+    ULONGLONG deadlineMs = 0;
+};
+
 struct BwItem
 {
     std::wstring id;
@@ -54,6 +98,8 @@ struct BwItem
     std::wstring folder;
     std::wstring vault;
     std::wstring username;
+    std::wstring password;
+    bool hasTotp = false;
 };
 
 void secureClear(std::wstring& value)
@@ -87,6 +133,31 @@ std::wstring trimCliOutput(std::wstring value)
         value.erase(value.begin());
     }
     return value;
+}
+
+void secureClear(std::vector<unsigned char>& value)
+{
+    if (!value.empty())
+    {
+        SecureZeroMemory(value.data(), value.size());
+        value.clear();
+    }
+}
+
+std::wstring friendlyBitwardenError(const std::wstring& raw, const wchar_t* fallback)
+{
+    const std::wstring lower = lowerCopy(raw);
+    if (lower.find(L"decryption operation failed") != std::wstring::npos ||
+        lower.find(L"cryptography error") != std::wstring::npos)
+    {
+        return L"That master password could not unlock this vault. Check it and try again. If the password is correct, reconnect Bitwarden from Settings.";
+    }
+    if (lower.find(L"not logged in") != std::wstring::npos || lower.find(L"unauthenticated") != std::wstring::npos ||
+        lower.find(L"invalid_grant") != std::wstring::npos)
+    {
+        return L"The Bitwarden CLI sign-in has expired. Sign in again from the Bitwarden Settings section.";
+    }
+    return fallback;
 }
 
 std::wstring quoteArg(const std::wstring& value)
@@ -157,6 +228,11 @@ std::wstring findBwExe()
 std::wstring sessionCachePath()
 {
     return settingsDirectory() + L"\\bitwarden_session.bin";
+}
+
+std::wstring pinCachePath()
+{
+    return settingsDirectory() + L"\\bitwarden_pin.bin";
 }
 
 std::string readFileBytes(const std::wstring& path)
@@ -480,6 +556,283 @@ BwProcessResult runBw(const std::vector<std::wstring>& args,
     return result;
 }
 
+BwHttpResult requestLocalBw(USHORT port, const std::wstring& authToken,
+                            const wchar_t* method, const std::wstring& path,
+                            DWORD timeoutMs = kBwServeRequestTimeoutMs)
+{
+    BwHttpResult result;
+    if (authToken.empty())
+    {
+        return result;
+    }
+    HINTERNET session = WinHttpOpen(L"QuickPal/Bitwarden", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session)
+    {
+        return result;
+    }
+    WinHttpSetTimeouts(session, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+
+    HINTERNET connection = WinHttpConnect(session, L"127.0.0.1", port, 0);
+    if (!connection)
+    {
+        WinHttpCloseHandle(session);
+        return result;
+    }
+
+    HINTERNET request = WinHttpOpenRequest(connection, method, path.c_str(), nullptr,
+                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!request)
+    {
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return result;
+    }
+
+    std::wstring authHeader = L"Authorization: Bearer " + authToken;
+    const BOOL addedHeader = WinHttpAddRequestHeaders(
+        request, authHeader.c_str(), static_cast<DWORD>(authHeader.size()),
+        WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    secureClear(authHeader);
+    if (!addedHeader)
+    {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return result;
+    }
+
+    const BOOL sent = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                         WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                      WinHttpReceiveResponse(request, nullptr);
+    result.sent = sent == TRUE;
+    if (sent)
+    {
+        DWORD size = sizeof(result.statusCode);
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &result.statusCode, &size,
+                            WINHTTP_NO_HEADER_INDEX);
+
+        std::string bytes;
+        for (;;)
+        {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available) || available == 0)
+            {
+                break;
+            }
+            if (bytes.size() + available > 64 * 1024 * 1024)
+            {
+                result.sent = false;
+                break;
+            }
+            const size_t offset = bytes.size();
+            bytes.resize(offset + available);
+            DWORD read = 0;
+            if (!WinHttpReadData(request, bytes.data() + offset, available, &read))
+            {
+                result.sent = false;
+                bytes.resize(offset);
+                break;
+            }
+            bytes.resize(offset + read);
+        }
+        result.output = fromUtf8(bytes);
+        secureClear(bytes);
+    }
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return result;
+}
+
+std::optional<std::wstring> randomBwServeAuthToken()
+{
+    std::array<unsigned char, 32> bytes{};
+    if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
+    {
+        SecureZeroMemory(bytes.data(), bytes.size());
+        return std::nullopt;
+    }
+
+    constexpr wchar_t digits[] = L"0123456789abcdef";
+    std::wstring token;
+    token.reserve(bytes.size() * 2);
+    for (const unsigned char value : bytes)
+    {
+        token.push_back(digits[value >> 4]);
+        token.push_back(digits[value & 0x0f]);
+    }
+    SecureZeroMemory(bytes.data(), bytes.size());
+    return token;
+}
+
+BwServeProcess startBwServeProcess(USHORT port, const std::wstring& sessionToken,
+                                   const std::wstring& authToken)
+{
+    BwServeProcess result;
+    const std::wstring bw = findBwExe();
+    if (bw.empty() || sessionToken.empty() || authToken.empty())
+    {
+        return result;
+    }
+
+    const std::vector<std::wstring> args = {
+        L"serve", L"--hostname", L"127.0.0.1", L"--port", std::to_wstring(port),
+        L"--auth-token-env", L"QUICKPAL_BW_SERVE_TOKEN"
+    };
+    std::wstring commandLine = makeCommandLine(bw, args);
+    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
+    mutableCommand.push_back(L'\0');
+    std::vector<std::pair<std::wstring, std::wstring>> overrides = {
+        { L"BW_SESSION", sessionToken },
+        { L"QUICKPAL_BW_SERVE_TOKEN", authToken },
+        { L"BW_NOINTERACTION", L"true" }
+    };
+    std::vector<wchar_t> environment = makeEnvironmentBlock(overrides);
+    for (auto& entry : overrides)
+    {
+        secureClear(entry.second);
+    }
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    const BOOL created = CreateProcessW(
+        bw.c_str(), mutableCommand.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+        environment.empty() ? nullptr : environment.data(),
+        nullptr, &startup, &process);
+
+    secureClear(commandLine);
+    if (!mutableCommand.empty())
+    {
+        SecureZeroMemory(mutableCommand.data(), mutableCommand.size() * sizeof(wchar_t));
+    }
+    if (!environment.empty())
+    {
+        SecureZeroMemory(environment.data(), environment.size() * sizeof(wchar_t));
+    }
+
+    if (!created)
+    {
+        return result;
+    }
+
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                          &limits, sizeof(limits)) ||
+        !AssignProcessToJobObject(job, process.hProcess))
+    {
+        TerminateProcess(process.hProcess, 0);
+        if (job)
+        {
+            CloseHandle(job);
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return result;
+    }
+    ResumeThread(process.hThread);
+    CloseHandle(process.hThread);
+    result.process = process.hProcess;
+    result.job = job;
+    result.processId = process.dwProcessId;
+    return result;
+}
+
+DWORD WINAPI watchBwServeDeadline(void* parameter)
+{
+    std::unique_ptr<BwServeWatchState> state(static_cast<BwServeWatchState*>(parameter));
+    if (!state || !state->process)
+    {
+        return 0;
+    }
+
+    for (;;)
+    {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= state->deadlineMs)
+        {
+            if (WaitForSingleObject(state->process, 0) == WAIT_TIMEOUT)
+            {
+                if (state->job)
+                {
+                    TerminateJobObject(state->job, 0);
+                }
+                else
+                {
+                    TerminateProcess(state->process, 0);
+                }
+            }
+            break;
+        }
+        const ULONGLONG remaining = state->deadlineMs - now;
+        const DWORD waitMs = static_cast<DWORD>(std::min<ULONGLONG>(remaining, 60000));
+        const DWORD wait = WaitForSingleObject(state->process, waitMs);
+        if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED)
+        {
+            break;
+        }
+    }
+    CloseHandle(state->process);
+    state->process = nullptr;
+    if (state->job)
+    {
+        CloseHandle(state->job);
+        state->job = nullptr;
+    }
+    return 0;
+}
+
+bool armBwServeDeadline(HANDLE process, HANDLE job, ULONGLONG deadlineMs)
+{
+    HANDLE watchedProcess = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), &watchedProcess,
+                         SYNCHRONIZE | PROCESS_TERMINATE, FALSE, 0))
+    {
+        return false;
+    }
+
+    HANDLE watchedJob = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), &watchedJob,
+                         JOB_OBJECT_TERMINATE, FALSE, 0))
+    {
+        CloseHandle(watchedProcess);
+        return false;
+    }
+
+    auto state = std::make_unique<BwServeWatchState>();
+    state->process = watchedProcess;
+    state->job = watchedJob;
+    state->deadlineMs = deadlineMs;
+    HANDLE thread = CreateThread(nullptr, 0, watchBwServeDeadline, state.get(), 0, nullptr);
+    if (!thread)
+    {
+        CloseHandle(watchedProcess);
+        CloseHandle(watchedJob);
+        return false;
+    }
+    state.release();
+    CloseHandle(thread);
+    return true;
+}
+
+USHORT randomBwServePort()
+{
+    unsigned int value = 0;
+    if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value), sizeof(value),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
+    {
+        value = static_cast<unsigned int>(GetTickCount64());
+    }
+    return static_cast<USHORT>(49152 + (value % 15000));
+}
+
 void launchBwInteractive(const std::vector<std::wstring>& args)
 {
     const std::wstring bw = findBwExe();
@@ -722,6 +1075,33 @@ std::wstring jsonArrayProperty(const std::wstring& object, const wchar_t* key)
     return end == std::wstring::npos ? std::wstring{} : object.substr(*pos, end - *pos + 1);
 }
 
+std::wstring bwResponseObject(const std::wstring& response)
+{
+    return jsonObjectProperty(response, L"data");
+}
+
+std::wstring bwResponseArray(const std::wstring& response)
+{
+    std::wstring direct = jsonArrayProperty(response, L"data");
+    if (!direct.empty())
+    {
+        return direct;
+    }
+    std::wstring envelope = bwResponseObject(response);
+    if (envelope.empty())
+    {
+        return {};
+    }
+    std::wstring nested = jsonArrayProperty(envelope, L"data");
+    secureClear(envelope);
+    return nested;
+}
+
+std::optional<std::wstring> bwResponseString(const std::wstring& response)
+{
+    return jsonStringProperty(response, L"data");
+}
+
 std::vector<std::wstring> jsonObjectsFromArray(const std::wstring& array)
 {
     std::vector<std::wstring> objects;
@@ -829,6 +1209,15 @@ std::vector<BwItem> parseItems(std::wstring& json,
                     item.username = *username;
                 }
             }
+            if (auto password = jsonStringProperty(login, L"password"))
+            {
+                item.password = std::move(*password);
+            }
+            if (auto totp = jsonStringProperty(login, L"totp"); totp && !totp->empty())
+            {
+                item.hasTotp = true;
+                secureClear(*totp);
+            }
 
             std::wstring uris = jsonArrayProperty(login, L"uris");
             for (const auto& uriObject : jsonObjectsFromArray(uris))
@@ -898,6 +1287,7 @@ Command makeBwItemCommand(const BwItem& item, bool includeUsername, int rank)
     }
     command.searchText = lowerCopy(search);
     command.key = L"bitwarden|" + lowerCopy(item.id);
+    command.hasTotp = item.hasTotp;
     return command;
 }
 
@@ -908,11 +1298,37 @@ Command makeControlCommand(const std::wstring& title, const std::wstring& subtit
     return command;
 }
 
+std::optional<std::wstring> promptValue(HWND owner, const wchar_t* title, const wchar_t* label,
+                                        bool secret, const std::wstring& initial = {});
 std::optional<std::wstring> promptSecret(HWND owner, const wchar_t* title, const wchar_t* label);
+void showBitwardenMessage(HWND owner, const wchar_t* title, const std::wstring& message, bool warning = true);
 
 class BitwardenProvider : public Provider
 {
 public:
+    BitwardenProvider()
+    {
+        loadPersistedPin();
+    }
+
+    ~BitwardenProvider() override
+    {
+        {
+            std::lock_guard<std::mutex> lock(refreshMutex_);
+            refreshStop_ = true;
+            refreshCancel_.store(true);
+        }
+        refreshCv_.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopServeLocked();
+        }
+        if (refreshWorker_.joinable())
+        {
+            refreshWorker_.join();
+        }
+    }
+
     ProviderInfo info() const override
     {
         ProviderInfo info;
@@ -921,6 +1337,7 @@ public:
         info.prefixes = { L"pw" };
         info.mode = QueryMode::Bitwarden;
         info.exclusive = true;
+        info.settingsSummary = L"Windows Hello, PIN access, secret actions, clipboard, and locking";
         return info;
     }
 
@@ -949,10 +1366,8 @@ public:
 
         if (items.empty())
         {
-            sink.add(makeControlCommand(L"Unlock and sync Bitwarden",
-                                        L"Uses bw.exe directly and caches metadata only", L"sync"), 18000);
-            sink.add(makeControlCommand(L"Log in to Bitwarden CLI",
-                                        L"Opens bw.exe login in its own console", L"login"), 17900);
+            sink.add(makeControlCommand(L"Connect Bitwarden",
+                                        L"Sign in or unlock, then read the local vault cache", L"connect"), 18000);
             if (!status.empty())
             {
                 sink.add(makeControlCommand(L"Bitwarden status", status, L"noop"), 1000);
@@ -961,6 +1376,7 @@ public:
         }
 
         int rank = 0;
+        int matchCount = 0;
         for (const auto& item : items)
         {
             Command command = makeBwItemCommand(item, ctx.settings.bitwardenSearchUsernames, rank);
@@ -968,6 +1384,7 @@ public:
             if (base >= 0)
             {
                 sink.add(std::move(command), base + 15500 - rank);
+                ++matchCount;
             }
             ++rank;
         }
@@ -977,6 +1394,11 @@ public:
             sink.add(makeControlCommand(L"Sync Bitwarden metadata",
                                         status.empty() ? L"Refresh cached item names, domains, folders, and usernames" : status,
                                         L"sync"), 12000);
+        }
+        else if (matchCount == 0)
+        {
+            sink.add(makeControlCommand(L"No matches - sync Bitwarden",
+                                        L"Refresh from Bitwarden, then search this term again", L"sync"), 12000);
         }
     }
 
@@ -996,6 +1418,7 @@ public:
         switch (command.action)
         {
         case ActionKind::None:
+            return copySecret(ctx, command, L"password");
         case ActionKind::Open:
         case ActionKind::BitwardenOpenSite:
             return openSite(command);
@@ -1015,34 +1438,47 @@ public:
     void settings(const ProviderContext&, std::vector<SettingRow>& out) override
     {
         out.push_back(makeSettingHeader(L"Bitwarden"));
+        out.push_back(makeSettingHeader(L"Search"));
         out.push_back(makeSettingItem(SettingField::ProviderShortcut, SettingKind::Action,
                                       L"Shortcut", L"Open Bitwarden search directly", info().id));
         out.push_back(makeSettingItem(SettingField::ProviderPrefix, SettingKind::Action,
                                       L"Prefix", L"Typed alias for Bitwarden search", info().id));
-        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
-                                      L"Install Bitwarden CLI", L"Open Bitwarden CLI install docs", info().id, L"install"));
-        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
-                                      L"Log in to CLI", L"Run bw.exe login in its own console", info().id, L"login"));
-        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
-                                      L"Sync metadata", L"Cache item name, domain, folder, vault, and username", info().id, L"sync"));
-        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
-                                      L"Lock session", L"Clear QuickPal's Bitwarden session and run bw lock", info().id, L"lock"));
         out.push_back(makeSettingItem(SettingField::BitwardenSearchUsernames, SettingKind::Toggle,
                                       L"Search usernames", L"Include usernames in metadata search results"));
+
+        out.push_back(makeSettingHeader(L"Access"));
+        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
+                                      L"Account email", L"Saved locally; the master password is never saved", info().id, L"account-email"));
         out.push_back(makeSettingItem(SettingField::BitwardenUnlockWithPin, SettingKind::Toggle,
-                                      L"Unlock with PIN", L"Use a local QuickPal PIN for the active session window"));
+                                      L"Unlock secrets with PIN", L"Use the persistent QuickPal PIN configured below"));
+        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
+                                      L"Set or change PIN", L"PIN setup only happens here in Settings", info().id, L"set-pin"));
+        out.push_back(makeSettingItem(SettingField::BitwardenUnlockWithHello, SettingKind::Toggle,
+                                      L"Unlock with Windows Hello", L"Prefer face, fingerprint, or Windows PIN; saved PIN is fallback"));
+        out.push_back(makeSettingItem(SettingField::BitwardenPinTimeoutSeconds, SettingKind::Stepper,
+                                      L"Secret authorization", L"Ask for PIN or Windows Hello again after this window"));
         out.push_back(makeSettingItem(SettingField::BitwardenRequireMasterOnRestart, SettingKind::Toggle,
-                                      L"Master password on restart", L"Do not persist the Bitwarden session between app launches"));
-        out.push_back(makeSettingItem(SettingField::BitwardenSecretTimeoutSeconds, SettingKind::Stepper,
-                                      L"Secret timeout", L"Clear the in-memory session after this many minutes"));
+                                      L"Master password after restart", L"Never persist the Bitwarden session between QuickPal launches"));
+        out.push_back(makeSettingItem(SettingField::BitwardenUseServe, SettingKind::Toggle,
+                                      L"Fast local API", L"Managed automatically and limited to the authorized window"));
+
+        out.push_back(makeSettingHeader(L"Secrets"));
         out.push_back(makeSettingItem(SettingField::BitwardenClipboardClearSeconds, SettingKind::Stepper,
-                                      L"Clipboard clear", L"Clear secret clipboard data if unchanged"));
+                                      L"Clipboard clear", L"Clear copied passwords and TOTP codes if unchanged"));
         out.push_back(makeSettingItem(SettingField::BitwardenLockOnSleep, SettingKind::Toggle,
                                       L"Lock on sleep", L"Run bw lock when Windows suspends"));
         out.push_back(makeSettingItem(SettingField::BitwardenLockOnExit, SettingKind::Toggle,
                                       L"Lock on exit", L"Run bw lock when QuickPal exits"));
-        out.push_back(makeSettingItem(SettingField::BitwardenUseServe, SettingKind::Toggle,
-                                      L"Use bw serve", L"Advanced only; direct bw.exe remains the default path"));
+
+        out.push_back(makeSettingHeader(L"Maintenance"));
+        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
+                                      L"Install Bitwarden CLI", L"Open Bitwarden CLI install docs", info().id, L"install"));
+        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
+                                      L"Connect Bitwarden", L"Sign in or unlock, then read the local vault cache", info().id, L"connect"));
+        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
+                                      L"Sync metadata", L"Cache item name, domain, folder, vault, and username", info().id, L"sync"));
+        out.push_back(makeSettingItem(SettingField::ProviderAction, SettingKind::Action,
+                                      L"Lock session", L"Clear QuickPal's Bitwarden session and run bw lock", info().id, L"lock"));
     }
 
     bool applySetting(const ProviderContext& ctx, const SettingItem& item) override
@@ -1051,13 +1487,287 @@ public:
     }
 
 private:
-    void clearSessionStateLocked()
+    enum class HelloResult
     {
-        secureClear(session_);
-        pinSalt_.clear();
-        pinHash_.clear();
+        Verified,
+        Canceled,
+        Unavailable,
+        Failed,
+    };
+
+    bool loadPersistedPin()
+    {
+        std::string protectedBytes = readFileBytes(pinCachePath());
+        if (protectedBytes.empty())
+        {
+            return false;
+        }
+        std::wstring text = unprotectForCurrentUser(protectedBytes);
+        secureClear(protectedBytes);
+        if (text.empty())
+        {
+            deleteFileQuietly(pinCachePath());
+            return false;
+        }
+
+        std::wstringstream input(text);
+        std::wstring version;
+        std::wstring saltHex;
+        std::wstring hashHex;
+        std::getline(input, version);
+        std::getline(input, saltHex);
+        std::getline(input, hashHex);
+        std::vector<unsigned char> salt = bytesFromHex(saltHex);
+        std::vector<unsigned char> hash = bytesFromHex(hashHex);
+        secureClear(text);
+        if (version != L"1" || salt.size() != 16 || hash.size() != 32)
+        {
+            secureClear(salt);
+            secureClear(hash);
+            deleteFileQuietly(pinCachePath());
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        secureClear(pinSalt_);
+        secureClear(pinHash_);
+        pinSalt_ = std::move(salt);
+        pinHash_ = std::move(hash);
         pinAttempts_ = 0;
         nextPinAllowedMs_ = 0;
+        pinAuthorizedUntilMs_ = 0;
+        return true;
+    }
+
+    void savePersistedPin()
+    {
+        std::vector<unsigned char> salt;
+        std::vector<unsigned char> hash;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            salt = pinSalt_;
+            hash = pinHash_;
+        }
+        if (salt.size() != 16 || hash.size() != 32)
+        {
+            secureClear(salt);
+            secureClear(hash);
+            return;
+        }
+
+        const std::wstring saltText = hexBytes(salt);
+        const std::wstring hashText = hexBytes(hash);
+        std::wstring text = L"1\n" + saltText + L"\n" + hashText + L"\n";
+        secureClear(salt);
+        secureClear(hash);
+        std::string protectedBytes = protectForCurrentUser(text);
+        secureClear(text);
+        if (!protectedBytes.empty())
+        {
+            writeFileBytes(pinCachePath(), protectedBytes);
+            secureClear(protectedBytes);
+        }
+    }
+
+    void clearCachedSecretsLocked()
+    {
+        for (auto& item : items_)
+        {
+            secureClear(item.password);
+        }
+    }
+
+    bool serveProcessRunningLocked()
+    {
+        if (!serveProcess_)
+        {
+            return false;
+        }
+        DWORD exitCode = 0;
+        if (!GetExitCodeProcess(serveProcess_, &exitCode) || exitCode != STILL_ACTIVE)
+        {
+            if (serveJob_)
+            {
+                CloseHandle(serveJob_);
+                serveJob_ = nullptr;
+            }
+            CloseHandle(serveProcess_);
+            serveProcess_ = nullptr;
+            serveProcessId_ = 0;
+            servePort_ = 0;
+            serveDeadlineMs_ = 0;
+            secureClear(serveAuthToken_);
+            return false;
+        }
+        return true;
+    }
+
+    void stopServeLocked()
+    {
+        if (serveProcess_)
+        {
+            if (WaitForSingleObject(serveProcess_, 0) == WAIT_TIMEOUT)
+            {
+                TerminateProcess(serveProcess_, 0);
+            }
+            CloseHandle(serveProcess_);
+        }
+        if (serveJob_)
+        {
+            CloseHandle(serveJob_);
+        }
+        serveProcess_ = nullptr;
+        serveJob_ = nullptr;
+        serveProcessId_ = 0;
+        servePort_ = 0;
+        serveDeadlineMs_ = 0;
+        secureClear(serveAuthToken_);
+    }
+
+    void clearSessionStateLocked()
+    {
+        stopServeLocked();
+        secureClear(session_);
+        sessionExpiresAtMs_ = 0;
+        clearCachedSecretsLocked();
+        pinAttempts_ = 0;
+        nextPinAllowedMs_ = 0;
+        pinAuthorizedUntilMs_ = 0;
+        needsInitialSync_ = false;
+    }
+
+    bool ensureServe(const Settings& settings)
+    {
+        if (!settings.bitwardenUseServe)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopServeLocked();
+            return false;
+        }
+
+        std::wstring session;
+        ULONGLONG deadlineMs = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const ULONGLONG now = GetTickCount64();
+            if (serveProcessRunningLocked() && !serveAuthToken_.empty() && now < serveDeadlineMs_)
+            {
+                return true;
+            }
+            stopServeLocked();
+            if (session_.empty())
+            {
+                return false;
+            }
+            if (settings.bitwardenUnlockWithPin || settings.bitwardenUnlockWithHello)
+            {
+                if (pinAuthorizedUntilMs_ <= now)
+                {
+                    return false;
+                }
+                deadlineMs = pinAuthorizedUntilMs_;
+            }
+            else
+            {
+                deadlineMs = now + static_cast<ULONGLONG>(std::max(60, settings.bitwardenPinTimeoutSeconds)) * 1000ULL;
+            }
+            session = session_;
+        }
+
+        for (int attempt = 0; attempt < 6; ++attempt)
+        {
+            const USHORT port = randomBwServePort();
+            auto authToken = randomBwServeAuthToken();
+            if (!authToken)
+            {
+                break;
+            }
+            BwServeProcess server = startBwServeProcess(port, session, *authToken);
+            if (!server.process)
+            {
+                secureClear(*authToken);
+                continue;
+            }
+
+            bool ready = false;
+            const ULONGLONG startupDeadline = GetTickCount64() + kBwServeStartTimeoutMs;
+            while (GetTickCount64() < startupDeadline)
+            {
+                if (WaitForSingleObject(server.process, 0) == WAIT_OBJECT_0)
+                {
+                    break;
+                }
+                BwHttpResult status = requestLocalBw(port, *authToken, L"GET", L"/status", 1000);
+                secureClear(status.output);
+                if (status.ok())
+                {
+                    ready = true;
+                    break;
+                }
+                Sleep(75);
+            }
+
+            if (ready && armBwServeDeadline(server.process, server.job, deadlineMs))
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                stopServeLocked();
+                serveProcess_ = server.process;
+                serveJob_ = server.job;
+                serveProcessId_ = server.processId;
+                servePort_ = port;
+                serveDeadlineMs_ = deadlineMs;
+                serveAuthToken_ = *authToken;
+                secureClear(*authToken);
+                secureClear(session);
+                return true;
+            }
+
+            if (WaitForSingleObject(server.process, 0) == WAIT_TIMEOUT)
+            {
+                TerminateProcess(server.process, 0);
+            }
+            if (server.job)
+            {
+                CloseHandle(server.job);
+            }
+            CloseHandle(server.process);
+            secureClear(*authToken);
+        }
+        secureClear(session);
+        return false;
+    }
+
+    std::optional<BwHttpResult> callServe(const Settings& settings, const wchar_t* method,
+                                          const std::wstring& path,
+                                          DWORD timeoutMs = kBwServeRequestTimeoutMs)
+    {
+        if (!ensureServe(settings))
+        {
+            return std::nullopt;
+        }
+        USHORT port = 0;
+        std::wstring authToken;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!serveProcessRunningLocked())
+            {
+                return std::nullopt;
+            }
+            port = servePort_;
+            authToken = serveAuthToken_;
+        }
+
+        BwHttpResult result = requestLocalBw(port, authToken, method, path, timeoutMs);
+        secureClear(authToken);
+        if (!result.sent)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (servePort_ == port)
+            {
+                stopServeLocked();
+            }
+        }
+        return result;
     }
 
     bool loadPersistedSession(const Settings& settings)
@@ -1090,38 +1800,61 @@ private:
         }
 
         std::wstringstream input(text);
+        std::wstring version;
         std::wstring expiryText;
         std::wstring vaultUrl;
         std::wstring saltHex;
         std::wstring hashHex;
         std::wstring session;
+        std::getline(input, version);
+        if (version != L"2" && version != L"3")
+        {
+            secureClear(text);
+            deleteFileQuietly(sessionCachePath());
+            return false;
+        }
         std::getline(input, expiryText);
         std::getline(input, vaultUrl);
-        std::getline(input, saltHex);
-        std::getline(input, hashHex);
+        if (version == L"2")
+        {
+            std::getline(input, saltHex);
+            std::getline(input, hashHex);
+        }
         std::getline(input, session);
         ULONGLONG expiry = _wcstoui64(expiryText.c_str(), nullptr, 10);
         std::vector<unsigned char> salt = bytesFromHex(saltHex);
         std::vector<unsigned char> hash = bytesFromHex(hashHex);
         secureClear(text);
 
-        if (session.empty() || expiry <= currentTimeMs() ||
-            (settings.bitwardenUnlockWithPin && (salt.empty() || hash.empty())))
+        if (session.empty() || expiry <= currentTimeMs())
         {
             secureClear(session);
+            secureClear(salt);
+            secureClear(hash);
             deleteFileQuietly(sessionCachePath());
             return false;
         }
 
+        bool migratedPin = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             clearSessionStateLocked();
             session_ = std::move(session);
             sessionExpiresAtMs_ = expiry;
             vaultUrl_ = vaultUrl.empty() ? kDefaultVaultUrl : vaultUrl;
-            pinSalt_ = std::move(salt);
-            pinHash_ = std::move(hash);
+            if (pinSalt_.empty() && pinHash_.empty() && salt.size() == 16 && hash.size() == 32)
+            {
+                pinSalt_ = std::move(salt);
+                pinHash_ = std::move(hash);
+                migratedPin = true;
+            }
             status_ = L"Bitwarden session restored";
+        }
+        secureClear(salt);
+        secureClear(hash);
+        if (migratedPin)
+        {
+            savePersistedPin();
         }
         return true;
     }
@@ -1137,8 +1870,6 @@ private:
         std::wstring session;
         std::wstring vaultUrl;
         ULONGLONG expiry = 0;
-        std::vector<unsigned char> salt;
-        std::vector<unsigned char> hash;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (session_.empty() || sessionExpiresAtMs_ <= currentTimeMs())
@@ -1146,20 +1877,12 @@ private:
                 deleteFileQuietly(sessionCachePath());
                 return;
             }
-            if (settings.bitwardenUnlockWithPin && (pinSalt_.empty() || pinHash_.empty()))
-            {
-                deleteFileQuietly(sessionCachePath());
-                return;
-            }
             session = session_;
             vaultUrl = vaultUrl_;
             expiry = sessionExpiresAtMs_;
-            salt = pinSalt_;
-            hash = pinHash_;
         }
 
-        std::wstring text = std::to_wstring(expiry) + L"\n" + vaultUrl + L"\n" +
-            hexBytes(salt) + L"\n" + hexBytes(hash) + L"\n" + session + L"\n";
+        std::wstring text = L"3\n" + std::to_wstring(expiry) + L"\n" + vaultUrl + L"\n" + session + L"\n";
         std::string protectedBytes = protectForCurrentUser(text);
         secureClear(text);
         secureClear(session);
@@ -1168,6 +1891,102 @@ private:
             writeFileBytes(sessionCachePath(), protectedBytes);
             secureClear(protectedBytes);
         }
+    }
+
+    struct RefreshRequest
+    {
+        Settings settings;
+        HWND window = nullptr;
+        HWND previousWindow = nullptr;
+        ProviderStatusReporter statusReporter = nullptr;
+        bool runSync = false;
+    };
+
+    void ensureRefreshWorker()
+    {
+        bool expected = false;
+        if (refreshWorkerStarted_.compare_exchange_strong(expected, true))
+        {
+            refreshWorker_ = std::thread([this] { refreshWorkerLoop(); });
+        }
+    }
+
+    void refreshWorkerLoop()
+    {
+        for (;;)
+        {
+            RefreshRequest request;
+            {
+                std::unique_lock<std::mutex> lock(refreshMutex_);
+                refreshCv_.wait(lock, [this] { return refreshStop_ || refreshPending_; });
+                if (refreshStop_)
+                {
+                    break;
+                }
+                request = refreshRequest_;
+                refreshPending_ = false;
+                refreshRunning_ = true;
+            }
+
+            const ProviderContext ctx{ request.settings, request.window, request.previousWindow,
+                                       request.statusReporter };
+            const bool ok = refreshMetadataAuthorized(ctx, request.runSync);
+            if (!ok && !refreshCancel_.load())
+            {
+                ctx.reportStatus(kProviderId, L"Vault refresh failed. Try Sync metadata again.");
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(refreshMutex_);
+                refreshRunning_ = false;
+            }
+            refreshDoneCv_.notify_all();
+            if (request.window)
+            {
+                PostMessageW(request.window, kAsyncProviderUpdatedMessage, 0, 0);
+            }
+        }
+    }
+
+    bool queueMetadataRefresh(const ProviderContext& ctx, bool runSync)
+    {
+        if (!ensureSession(ctx, true))
+        {
+            ctx.reportStatus(kProviderId, L"Connect canceled.");
+            return false;
+        }
+
+        ensureRefreshWorker();
+        {
+            std::lock_guard<std::mutex> lock(refreshMutex_);
+            if (refreshPending_ || refreshRunning_)
+            {
+                ctx.reportStatus(kProviderId, L"Vault refresh already in progress...");
+                return true;
+            }
+            refreshCancel_.store(false);
+            refreshRequest_ = RefreshRequest{ ctx.settings, ctx.window, ctx.previousWindow,
+                                              ctx.statusReporter, runSync };
+            refreshPending_ = true;
+        }
+        ctx.reportStatus(kProviderId, L"Connected. Refreshing in the background...");
+        refreshCv_.notify_one();
+        return true;
+    }
+
+    void cancelMetadataRefreshAndWait()
+    {
+        refreshCancel_.store(true);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopServeLocked();
+        }
+        std::unique_lock<std::mutex> lock(refreshMutex_);
+        if (refreshPending_ && !refreshRunning_)
+        {
+            refreshPending_ = false;
+        }
+        refreshDoneCv_.wait(lock, [this] { return !refreshRunning_ && !refreshPending_; });
     }
 
     bool executeControl(const ProviderContext& ctx, const std::wstring& action)
@@ -1179,12 +1998,53 @@ private:
         }
         if (action == L"login")
         {
-            launchBwInteractive({ L"login" });
+            return loginNative(ctx);
+        }
+        if (action == L"reconnect")
+        {
+            lockSession(ctx.settings, false);
+            BwProcessResult logout = runBw({ L"logout", L"--nointeraction" }, {}, kBwTimeoutMs);
+            secureClear(logout.output);
+            return loginNative(ctx);
+        }
+        if (action == L"account-email")
+        {
+            auto email = promptValue(ctx.window, L"Bitwarden account", L"Account email", false,
+                                     ctx.settings.bitwardenAccountEmail);
+            if (email)
+            {
+                *email = trimCliOutput(std::move(*email));
+                setBitwardenAccountEmail(*email);
+            }
             return true;
+        }
+        if (action == L"set-pin")
+        {
+            if (!ctx.settings.bitwardenUnlockWithPin)
+            {
+                showBitwardenMessage(ctx.window, L"PIN unlock is off",
+                                     L"Turn on Unlock secrets with PIN, then set the PIN.", false);
+                return true;
+            }
+            if (!ensureSession(ctx, false))
+            {
+                return false;
+            }
+            if (!setPin(ctx.window, ctx.settings.bitwardenPinTimeoutSeconds))
+            {
+                return false;
+            }
+            return true;
+        }
+        if (action == L"connect")
+        {
+            ctx.reportStatus(kProviderId, L"Connecting to the local vault...");
+            return queueMetadataRefresh(ctx, false);
         }
         if (action == L"sync")
         {
-            return refreshMetadata(ctx, true);
+            ctx.reportStatus(kProviderId, L"Syncing vault metadata...");
+            return queueMetadataRefresh(ctx, true);
         }
         if (action == L"lock")
         {
@@ -1194,9 +2054,88 @@ private:
         return true;
     }
 
+    bool loginNative(const ProviderContext& ctx)
+    {
+        if (findBwExe().empty())
+        {
+            showBitwardenMessage(ctx.window, L"Bitwarden CLI not found",
+                                 L"Install the Bitwarden CLI before signing in.", false);
+            return false;
+        }
+
+        std::wstring email = ctx.settings.bitwardenAccountEmail;
+        if (email.empty())
+        {
+            auto entered = promptValue(ctx.window, L"Bitwarden sign in", L"Account email", false);
+            if (!entered)
+            {
+                return false;
+            }
+            email = trimCliOutput(std::move(*entered));
+            if (email.empty())
+            {
+                return false;
+            }
+            setBitwardenAccountEmail(email);
+        }
+
+        auto password = promptSecret(ctx.window, L"Bitwarden sign in", L"Master password");
+        if (!password || password->empty())
+        {
+            return false;
+        }
+
+        ctx.reportStatus(kProviderId, L"Signing in...");
+        BwProcessResult result = runBw({ L"login", email, L"--raw", L"--passwordenv", L"QUICKPAL_BW_PASSWORD", L"--nointeraction" },
+                                       { { L"QUICKPAL_BW_PASSWORD", *password } }, kBwUnlockTimeoutMs);
+        secureClear(*password);
+        secureClear(email);
+        if (!result.started || result.timedOut || result.exitCode != 0)
+        {
+            const std::wstring raw = trimCliOutput(result.output);
+            std::wstring message = result.timedOut ? L"Bitwarden sign in timed out." :
+                friendlyBitwardenError(raw, L"Bitwarden could not sign in. Check the account email and master password.");
+            secureClear(result.output);
+            showBitwardenMessage(ctx.window, L"Could not sign in", message);
+            return false;
+        }
+
+        std::wstring session = trimCliOutput(result.output);
+        secureClear(result.output);
+        if (session.empty())
+        {
+            showBitwardenMessage(ctx.window, L"Could not open vault",
+                                 L"Bitwarden signed in but did not return an unlocked session.");
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            clearSessionStateLocked();
+            session_ = std::move(session);
+            sessionExpiresAtMs_ = std::numeric_limits<ULONGLONG>::max();
+            needsInitialSync_ = true;
+            status_ = L"Bitwarden signed in";
+        }
+        authorizeAfterMaster(ctx.settings);
+        ctx.reportStatus(kProviderId, L"Signed in. Preparing the vault...");
+        savePersistedSession(ctx.settings);
+        return true;
+    }
+
     void expireSessionIfNeeded(const Settings& settings)
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const bool authorizationExpired =
+            (settings.bitwardenUnlockWithPin || settings.bitwardenUnlockWithHello) &&
+            GetTickCount64() >= pinAuthorizedUntilMs_;
+        if (!settings.bitwardenUseServe || authorizationExpired)
+        {
+            stopServeLocked();
+        }
+        if (authorizationExpired)
+        {
+            clearCachedSecretsLocked();
+        }
         if (!session_.empty() && currentTimeMs() >= sessionExpiresAtMs_)
         {
             clearSessionStateLocked();
@@ -1221,21 +2160,74 @@ private:
 
         if (!hadActiveSession)
         {
+            BwProcessResult cliStatus = runBw({ L"status", L"--nointeraction" }, {}, kBwTimeoutMs);
+            bool unauthenticated = false;
+            if (cliStatus.exitCode == 0)
+            {
+                if (auto status = jsonStringProperty(cliStatus.output, L"status"))
+                {
+                    unauthenticated = _wcsicmp(status->c_str(), L"unauthenticated") == 0;
+                }
+                if (ctx.settings.bitwardenAccountEmail.empty())
+                {
+                    if (auto email = jsonStringProperty(cliStatus.output, L"userEmail"); email && !email->empty())
+                    {
+                        setBitwardenAccountEmail(*email);
+                    }
+                }
+            }
+            secureClear(cliStatus.output);
+            if (unauthenticated)
+            {
+                return loginNative(ctx);
+            }
             if (!unlockWithMasterPassword(ctx))
             {
                 return false;
-            }
-            if (ctx.settings.bitwardenUnlockWithPin && !pinReady())
-            {
-                setPin(ctx.window);
             }
             savePersistedSession(ctx.settings);
             return true;
         }
 
-        if (secretAction && ctx.settings.bitwardenUnlockWithPin && pinReady())
+        if (secretAction && (ctx.settings.bitwardenUnlockWithPin || ctx.settings.bitwardenUnlockWithHello))
         {
-            return verifyPin(ctx.window);
+            const ULONGLONG now = GetTickCount64();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (now < pinAuthorizedUntilMs_)
+                {
+                    return true;
+                }
+                stopServeLocked();
+                clearCachedSecretsLocked();
+            }
+            if (ctx.settings.bitwardenUnlockWithHello)
+            {
+                ctx.reportStatus(kProviderId, L"Waiting for Windows Hello...");
+                const HelloResult hello = verifyWindowsHello();
+                if (hello == HelloResult::Verified)
+                {
+                    authorizeSecrets(ctx.settings);
+                    return true;
+                }
+                if (hello == HelloResult::Canceled)
+                {
+                    return false;
+                }
+            }
+            if (!ctx.settings.bitwardenUnlockWithPin)
+            {
+                showBitwardenMessage(ctx.window, L"Windows Hello unavailable",
+                                     L"Windows Hello could not verify this request. Turn on PIN fallback or use the master password.");
+                return false;
+            }
+            if (!pinReady())
+            {
+                showBitwardenMessage(ctx.window, L"Set a QuickPal PIN",
+                                     L"PIN unlock is enabled, but no PIN is configured. Set it in Settings > Bitwarden.", false);
+                return false;
+            }
+            return verifyPin(ctx.window, ctx.settings);
         }
         return true;
     }
@@ -1244,7 +2236,8 @@ private:
     {
         if (findBwExe().empty())
         {
-            MessageBoxW(ctx.window, L"bw.exe was not found. Install Bitwarden CLI first.", L"QuickPal Bitwarden", MB_OK | MB_ICONINFORMATION);
+            showBitwardenMessage(ctx.window, L"Bitwarden CLI not found",
+                                 L"Install the Bitwarden CLI before unlocking.", false);
             ShellExecuteW(nullptr, L"open", kInstallUrl, nullptr, nullptr, SW_SHOWNORMAL);
             return false;
         }
@@ -1255,18 +2248,17 @@ private:
             return false;
         }
 
+        ctx.reportStatus(kProviderId, L"Unlocking the local vault...");
         BwProcessResult result = runBw({ L"unlock", L"--raw", L"--passwordenv", L"QUICKPAL_BW_PASSWORD", L"--nointeraction" },
-                                       { { L"QUICKPAL_BW_PASSWORD", *password } }, kBwTimeoutMs);
+                                       { { L"QUICKPAL_BW_PASSWORD", *password } }, kBwUnlockTimeoutMs);
         secureClear(*password);
         if (!result.started || result.timedOut || result.exitCode != 0)
         {
-            std::wstring message = result.timedOut ? L"bw unlock timed out." : trimCliOutput(result.output);
+            const std::wstring raw = trimCliOutput(result.output);
+            std::wstring message = result.timedOut ? L"Bitwarden took too long to unlock." :
+                friendlyBitwardenError(raw, L"Bitwarden could not unlock. Check the master password and try again.");
             secureClear(result.output);
-            if (message.empty())
-            {
-                message = L"bw unlock failed.";
-            }
-            MessageBoxW(ctx.window, message.c_str(), L"QuickPal Bitwarden", MB_OK | MB_ICONWARNING);
+            showBitwardenMessage(ctx.window, L"Could not unlock", message);
             return false;
         }
 
@@ -1274,7 +2266,8 @@ private:
         secureClear(result.output);
         if (session.empty())
         {
-            MessageBoxW(ctx.window, L"bw unlock did not return a session key.", L"QuickPal Bitwarden", MB_OK | MB_ICONWARNING);
+            showBitwardenMessage(ctx.window, L"Could not unlock",
+                                 L"Bitwarden did not return an unlocked session.");
             return false;
         }
 
@@ -1282,11 +2275,118 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             secureClear(session_);
             session_ = std::move(session);
-            sessionExpiresAtMs_ = currentTimeMs() + static_cast<ULONGLONG>(ctx.settings.bitwardenSecretTimeoutSeconds) * 1000ULL;
+            sessionExpiresAtMs_ = std::numeric_limits<ULONGLONG>::max();
             status_ = L"Bitwarden unlocked";
         }
+        authorizeAfterMaster(ctx.settings);
+        ctx.reportStatus(kProviderId, L"Vault unlocked.");
         savePersistedSession(ctx.settings);
         return true;
+    }
+
+    void authorizeSecrets(const Settings& settings)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pinAttempts_ = 0;
+        nextPinAllowedMs_ = 0;
+        pinAuthorizedUntilMs_ = GetTickCount64() +
+            static_cast<ULONGLONG>(settings.bitwardenPinTimeoutSeconds) * 1000ULL;
+    }
+
+    void authorizeAfterMaster(const Settings& settings)
+    {
+        if (settings.bitwardenUnlockWithPin || settings.bitwardenUnlockWithHello)
+        {
+            authorizeSecrets(settings);
+        }
+    }
+
+    HelloResult verifyWindowsHello()
+    {
+        using namespace ABI::Windows::Security::Credentials::UI;
+
+        const HRESULT initialized = RoInitialize(RO_INIT_SINGLETHREADED);
+        if (FAILED(initialized))
+        {
+            return HelloResult::Unavailable;
+        }
+
+        HSTRING className = nullptr;
+        HSTRING message = nullptr;
+        IUserConsentVerifierStatics* verifier = nullptr;
+        ABI::Windows::Foundation::IAsyncOperation<UserConsentVerificationResult>* operation = nullptr;
+        IAsyncInfo* asyncInfo = nullptr;
+        HelloResult result = HelloResult::Failed;
+
+        if (SUCCEEDED(WindowsCreateString(RuntimeClass_Windows_Security_Credentials_UI_UserConsentVerifier,
+                                           static_cast<UINT32>(wcslen(RuntimeClass_Windows_Security_Credentials_UI_UserConsentVerifier)),
+                                           &className)) &&
+            SUCCEEDED(RoGetActivationFactory(className,
+                                             kUserConsentVerifierStaticsId,
+                                             reinterpret_cast<void**>(&verifier))) &&
+            SUCCEEDED(WindowsCreateString(L"Unlock QuickPal Bitwarden secrets",
+                                          static_cast<UINT32>(wcslen(L"Unlock QuickPal Bitwarden secrets")),
+                                          &message)) &&
+            SUCCEEDED(verifier->RequestVerificationAsync(message, &operation)) && operation &&
+            SUCCEEDED(operation->QueryInterface(kAsyncInfoId, reinterpret_cast<void**>(&asyncInfo))))
+        {
+            const ULONGLONG deadline = GetTickCount64() + kBwUnlockTimeoutMs;
+            AsyncStatus status = AsyncStatus::Started;
+            while (GetTickCount64() < deadline && SUCCEEDED(asyncInfo->get_Status(&status)) && status == AsyncStatus::Started)
+            {
+                Sleep(25);
+            }
+            if (status == AsyncStatus::Completed)
+            {
+                UserConsentVerificationResult verification = UserConsentVerificationResult_Canceled;
+                if (SUCCEEDED(operation->GetResults(&verification)))
+                {
+                    if (verification == UserConsentVerificationResult_Verified)
+                    {
+                        result = HelloResult::Verified;
+                    }
+                    else if (verification == UserConsentVerificationResult_Canceled)
+                    {
+                        result = HelloResult::Canceled;
+                    }
+                    else
+                    {
+                        result = HelloResult::Unavailable;
+                    }
+                }
+            }
+            else if (status == AsyncStatus::Canceled)
+            {
+                result = HelloResult::Canceled;
+            }
+            else if (status == AsyncStatus::Started)
+            {
+                asyncInfo->Cancel();
+            }
+        }
+
+        if (asyncInfo)
+        {
+            asyncInfo->Release();
+        }
+        if (operation)
+        {
+            operation->Release();
+        }
+        if (verifier)
+        {
+            verifier->Release();
+        }
+        if (message)
+        {
+            WindowsDeleteString(message);
+        }
+        if (className)
+        {
+            WindowsDeleteString(className);
+        }
+        RoUninitialize();
+        return result;
     }
 
     bool pinReady() const
@@ -1295,7 +2395,7 @@ private:
         return !pinSalt_.empty() && !pinHash_.empty();
     }
 
-    bool setPin(HWND owner)
+    bool setPin(HWND owner, int timeoutSeconds)
     {
         auto pin = promptSecret(owner, L"Set QuickPal PIN", L"Local PIN for this Bitwarden session");
         if (!pin || pin->empty())
@@ -1310,8 +2410,8 @@ private:
                 secureClear(*confirm);
             }
             secureClear(*pin);
-            MessageBoxW(owner, L"PIN entries did not match. This Bitwarden session will require the master password again after timeout/restart.",
-                        L"QuickPal Bitwarden", MB_OK | MB_ICONWARNING);
+            showBitwardenMessage(owner, L"PINs did not match",
+                                 L"The Bitwarden session was not authorized. Try setting the PIN again.");
             return false;
         }
 
@@ -1330,28 +2430,40 @@ private:
             return false;
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        pinSalt_ = std::move(salt);
-        pinHash_ = std::move(hash);
-        pinAttempts_ = 0;
-        nextPinAllowedMs_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            secureClear(pinSalt_);
+            secureClear(pinHash_);
+            pinSalt_ = std::move(salt);
+            pinHash_ = std::move(hash);
+            pinAttempts_ = 0;
+            nextPinAllowedMs_ = 0;
+            pinAuthorizedUntilMs_ = GetTickCount64() + static_cast<ULONGLONG>(timeoutSeconds) * 1000ULL;
+        }
+        savePersistedPin();
         return true;
     }
 
-    bool verifyPin(HWND owner)
+    bool verifyPin(HWND owner, const Settings& settings)
     {
         const ULONGLONG now = GetTickCount64();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (now < pinAuthorizedUntilMs_)
+            {
+                return true;
+            }
             if (now < nextPinAllowedMs_)
             {
-                MessageBoxW(owner, L"Too many incorrect PIN attempts. Try again in a moment.",
-                            L"QuickPal Bitwarden", MB_OK | MB_ICONWARNING);
+                showBitwardenMessage(owner, L"PIN temporarily paused",
+                                     L"Too many incorrect attempts. Try again in a moment.");
                 return false;
             }
         }
 
-        auto pin = promptSecret(owner, L"QuickPal PIN", L"Enter local Bitwarden PIN");
+        const std::wstring label = L"Enter PIN (authorizes secrets for " +
+            std::to_wstring(settings.bitwardenPinTimeoutSeconds / 60) + L" minutes)";
+        auto pin = promptSecret(owner, L"Unlock Bitwarden secrets", label.c_str());
         if (!pin || pin->empty())
         {
             return false;
@@ -1364,7 +2476,7 @@ private:
             salt = pinSalt_;
             expected = pinHash_;
         }
-        const std::vector<unsigned char> actual = hashPin(*pin, salt);
+        std::vector<unsigned char> actual = hashPin(*pin, salt);
         secureClear(*pin);
 
         bool matches = actual.size() == expected.size();
@@ -1375,118 +2487,242 @@ private:
         }
         matches = matches && diff == 0;
 
-        std::lock_guard<std::mutex> lock(mutex_);
         if (matches)
         {
+            std::lock_guard<std::mutex> lock(mutex_);
             pinAttempts_ = 0;
             nextPinAllowedMs_ = 0;
+            pinAuthorizedUntilMs_ = GetTickCount64() +
+                static_cast<ULONGLONG>(settings.bitwardenPinTimeoutSeconds) * 1000ULL;
+            if (!actual.empty())
+            {
+                SecureZeroMemory(actual.data(), actual.size());
+            }
             return true;
         }
 
-        ++pinAttempts_;
-        const ULONGLONG backoffSeconds = std::min<ULONGLONG>(30, 1ULL << std::min(pinAttempts_, 5));
-        nextPinAllowedMs_ = GetTickCount64() + backoffSeconds * 1000ULL;
-        MessageBoxW(owner, L"Incorrect PIN.", L"QuickPal Bitwarden", MB_OK | MB_ICONWARNING);
+        bool lockedOut = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++pinAttempts_;
+            lockedOut = pinAttempts_ >= 5;
+            if (!lockedOut)
+            {
+                const ULONGLONG backoffSeconds = std::min<ULONGLONG>(30, 1ULL << std::min(pinAttempts_, 5));
+                nextPinAllowedMs_ = GetTickCount64() + backoffSeconds * 1000ULL;
+            }
+        }
+        if (!actual.empty())
+        {
+            SecureZeroMemory(actual.data(), actual.size());
+        }
+        if (lockedOut)
+        {
+            lockSession(settings, true);
+            showBitwardenMessage(owner, L"Bitwarden locked",
+                                 L"Five incorrect PIN attempts locked the session. Enter the master password to continue.");
+            return false;
+        }
+        showBitwardenMessage(owner, L"Incorrect PIN", L"That PIN did not match. Try again.");
         return false;
     }
 
     std::vector<unsigned char> hashPin(const std::wstring& pin, const std::vector<unsigned char>& salt) const
     {
         BCRYPT_ALG_HANDLE alg = nullptr;
-        if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
+        if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0)
         {
             return {};
         }
-
-        DWORD objectBytes = 0;
-        DWORD hashBytes = 0;
-        DWORD returned = 0;
-        if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectBytes),
-                              sizeof(objectBytes), &returned, 0) < 0 ||
-            BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hashBytes),
-                              sizeof(hashBytes), &returned, 0) < 0)
-        {
-            BCryptCloseAlgorithmProvider(alg, 0);
-            return {};
-        }
-
-        std::vector<unsigned char> object(objectBytes);
-        std::vector<unsigned char> hash(hashBytes);
-        BCRYPT_HASH_HANDLE handle = nullptr;
-        bool ok = BCryptCreateHash(alg, &handle, object.data(), objectBytes, nullptr, 0, 0) >= 0;
-        ok = ok && BCryptHashData(handle, const_cast<PUCHAR>(salt.data()), static_cast<ULONG>(salt.size()), 0) >= 0;
         std::string bytes = toUtf8(pin);
-        ok = ok && BCryptHashData(handle, reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())),
-                                  static_cast<ULONG>(bytes.size()), 0) >= 0;
-        ok = ok && BCryptFinishHash(handle, hash.data(), hashBytes, 0) >= 0;
+        std::vector<unsigned char> hash(32);
+        const NTSTATUS status = BCryptDeriveKeyPBKDF2(
+            alg,
+            reinterpret_cast<PUCHAR>(bytes.data()), static_cast<ULONG>(bytes.size()),
+            const_cast<PUCHAR>(salt.data()), static_cast<ULONG>(salt.size()),
+            210000ULL, hash.data(), static_cast<ULONG>(hash.size()), 0);
         secureClear(bytes);
-        if (handle)
-        {
-            BCryptDestroyHash(handle);
-        }
         BCryptCloseAlgorithmProvider(alg, 0);
-        return ok ? hash : std::vector<unsigned char>{};
+        return status >= 0 ? hash : std::vector<unsigned char>{};
     }
 
-    bool refreshMetadata(const ProviderContext& ctx, bool runSync)
+    bool refreshMetadataAuthorized(const ProviderContext& ctx, bool runSync)
     {
-        if (!ensureSession(ctx, true))
-        {
-            return false;
-        }
-
         std::wstring session = sessionSnapshot();
-        if (session.empty())
+        if (session.empty() || refreshCancel_.load())
         {
+            secureClear(session);
             return false;
         }
 
-        if (runSync)
+        bool initialSync = false;
         {
+            std::lock_guard<std::mutex> lock(mutex_);
+            initialSync = needsInitialSync_;
+        }
+        const bool shouldSync = runSync || initialSync;
+        bool syncedWithApi = false;
+        if (ctx.settings.bitwardenUseServe && ensureServe(ctx.settings))
+        {
+            if (shouldSync)
+            {
+                ctx.reportStatus(kProviderId, L"Syncing the Bitwarden vault...");
+                auto sync = callServe(ctx.settings, L"POST", L"/sync", kBwListTimeoutMs);
+                syncedWithApi = sync && sync->ok();
+                if (sync)
+                {
+                    secureClear(sync->output);
+                }
+                if (refreshCancel_.load())
+                {
+                    secureClear(session);
+                    return false;
+                }
+            }
+
+            ctx.reportStatus(kProviderId, L"Reading vault items...");
+            auto status = callServe(ctx.settings, L"GET", L"/status");
+            auto folders = callServe(ctx.settings, L"GET", L"/list/object/folders");
+            auto organizations = callServe(ctx.settings, L"GET", L"/list/object/organizations");
+            auto items = callServe(ctx.settings, L"GET", L"/list/object/items");
+            std::wstring itemJson = items && items->ok() ? bwResponseArray(items->output) : L"";
+            if (items && items->ok() && !itemJson.empty())
+            {
+                std::wstring folderJson = folders && folders->ok() ? bwResponseArray(folders->output) : L"[]";
+                std::wstring organizationJson = organizations && organizations->ok() ? bwResponseArray(organizations->output) : L"[]";
+                const auto folderMap = parseIdNameMap(folderJson);
+                const auto orgMap = parseIdNameMap(organizationJson);
+                std::vector<BwItem> parsed = parseItems(itemJson, folderMap, orgMap,
+                                                        ctx.settings.bitwardenSearchUsernames);
+
+                std::wstring vaultUrl;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    vaultUrl = vaultUrl_;
+                }
+                if (status && status->ok())
+                {
+                    std::wstring statusData = bwResponseObject(status->output);
+                    if (auto serverUrl = jsonStringProperty(statusData, L"serverUrl"); serverUrl && !serverUrl->empty())
+                    {
+                        vaultUrl = *serverUrl;
+                    }
+                    secureClear(statusData);
+                }
+
+                secureClear(items->output);
+                if (folders)
+                {
+                    secureClear(folders->output);
+                }
+                if (organizations)
+                {
+                    secureClear(organizations->output);
+                }
+                if (status)
+                {
+                    secureClear(status->output);
+                }
+                secureClear(folderJson);
+                secureClear(organizationJson);
+                secureClear(session);
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    clearCachedSecretsLocked();
+                    items_ = std::move(parsed);
+                    vaultUrl_ = vaultUrl.empty() ? kDefaultVaultUrl : vaultUrl;
+                    usernamesPresent_ = ctx.settings.bitwardenSearchUsernames;
+                    status_ = std::to_wstring(items_.size()) + L" Bitwarden items cached via local API";
+                    if (syncedWithApi)
+                    {
+                        needsInitialSync_ = false;
+                    }
+                }
+                std::wstring readyStatus;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    readyStatus = status_;
+                }
+                ctx.reportStatus(kProviderId, readyStatus);
+                savePersistedSession(ctx.settings);
+                return true;
+            }
+            if (items)
+            {
+                secureClear(items->output);
+            }
+            secureClear(itemJson);
+            if (folders)
+            {
+                secureClear(folders->output);
+            }
+            if (organizations)
+            {
+                secureClear(organizations->output);
+            }
+            if (status)
+            {
+                secureClear(status->output);
+            }
+            if (refreshCancel_.load())
+            {
+                secureClear(session);
+                return false;
+            }
+        }
+
+        bool syncedDirectly = false;
+        if (shouldSync && !syncedWithApi)
+        {
+            if (refreshCancel_.load())
+            {
+                secureClear(session);
+                return false;
+            }
+            ctx.reportStatus(kProviderId, L"Syncing through the bundled CLI...");
             BwProcessResult sync = runBw({ L"sync", L"--quiet", L"--nointeraction" }, { { L"BW_SESSION", session } }, kBwTimeoutMs);
+            syncedDirectly = sync.started && !sync.timedOut && sync.exitCode == 0;
             secureClear(sync.output);
         }
 
-        BwProcessResult status = runBw({ L"status", L"--nointeraction" }, { { L"BW_SESSION", session } }, kBwTimeoutMs);
-        BwProcessResult folders = runBw({ L"list", L"folders", L"--nointeraction" }, { { L"BW_SESSION", session } }, kBwListTimeoutMs);
-        BwProcessResult organizations = runBw({ L"list", L"organizations", L"--nointeraction" }, { { L"BW_SESSION", session } }, kBwListTimeoutMs);
+        if (refreshCancel_.load())
+        {
+            secureClear(session);
+            return false;
+        }
+
+        ctx.reportStatus(kProviderId, L"Reading vault items through the bundled CLI...");
         BwProcessResult items = runBw({ L"list", L"items", L"--nointeraction" }, { { L"BW_SESSION", session } }, kBwListTimeoutMs);
         secureClear(session);
 
         if (!items.started || items.timedOut || items.exitCode != 0)
         {
-            const std::wstring message = items.timedOut ? L"bw list items timed out." : trimCliOutput(items.output);
             secureClear(items.output);
-            secureClear(folders.output);
-            secureClear(organizations.output);
-            secureClear(status.output);
-            MessageBoxW(ctx.window, message.empty() ? L"Could not read Bitwarden items." : message.c_str(),
-                        L"QuickPal Bitwarden", MB_OK | MB_ICONWARNING);
             return false;
         }
 
-        std::wstring vaultUrl = vaultUrl_;
-        if (status.exitCode == 0)
-        {
-            if (auto serverUrl = jsonStringProperty(status.output, L"serverUrl"); serverUrl && !serverUrl->empty())
-            {
-                vaultUrl = *serverUrl;
-            }
-        }
-        const auto folderMap = folders.exitCode == 0 ? parseIdNameMap(folders.output) : std::unordered_map<std::wstring, std::wstring>{};
-        const auto orgMap = organizations.exitCode == 0 ? parseIdNameMap(organizations.output) : std::unordered_map<std::wstring, std::wstring>{};
+        const std::unordered_map<std::wstring, std::wstring> folderMap;
+        const std::unordered_map<std::wstring, std::wstring> orgMap;
         std::vector<BwItem> parsed = parseItems(items.output, folderMap, orgMap, ctx.settings.bitwardenSearchUsernames);
-        secureClear(folders.output);
-        secureClear(organizations.output);
-        secureClear(status.output);
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            clearCachedSecretsLocked();
             items_ = std::move(parsed);
-            vaultUrl_ = vaultUrl.empty() ? kDefaultVaultUrl : vaultUrl;
             usernamesPresent_ = ctx.settings.bitwardenSearchUsernames;
-            status_ = std::to_wstring(items_.size()) + L" Bitwarden items cached";
+            status_ = std::to_wstring(items_.size()) + L" Bitwarden items cached from the local vault";
+            if (syncedWithApi || syncedDirectly)
+            {
+                needsInitialSync_ = false;
+            }
         }
+        std::wstring readyStatus;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            readyStatus = status_;
+        }
+        ctx.reportStatus(kProviderId, readyStatus);
         savePersistedSession(ctx.settings);
         return true;
     }
@@ -1497,17 +2733,38 @@ private:
         return session_;
     }
 
-    std::optional<BwItem> itemById(const std::wstring& id) const
+    std::wstring cachedSecretById(const std::wstring& id, const wchar_t* field) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& item : items_)
         {
             if (item.id == id)
             {
-                return item;
+                if (_wcsicmp(field, L"password") == 0)
+                {
+                    return item.password;
+                }
+                if (_wcsicmp(field, L"username") == 0)
+                {
+                    return item.username;
+                }
+                return {};
             }
         }
-        return std::nullopt;
+        return {};
+    }
+
+    std::wstring itemUriById(const std::wstring& id) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& item : items_)
+        {
+            if (item.id == id)
+            {
+                return item.uri;
+            }
+        }
+        return {};
     }
 
     void forgetUsernamesIfDisabled(const Settings& settings)
@@ -1535,28 +2792,59 @@ private:
             return false;
         }
 
-        std::wstring session = sessionSnapshot();
-        BwProcessResult result = runBw({ L"get", field, command.data, L"--raw", L"--nointeraction" },
-                                       { { L"BW_SESSION", session } }, kBwTimeoutMs);
-        secureClear(session);
-
-        if (!result.started || result.timedOut || result.exitCode != 0)
+        std::wstring secret = cachedSecretById(command.data, field);
+        if (_wcsicmp(field, L"totp") == 0 && !command.hasTotp)
         {
-            std::wstring message = result.timedOut ? L"bw get timed out." : trimCliOutput(result.output);
-            secureClear(result.output);
-            if (message.empty())
-            {
-                message = L"Could not read that Bitwarden field.";
-            }
-            MessageBoxW(ctx.window, message.c_str(), L"QuickPal Bitwarden", MB_OK | MB_ICONWARNING);
+            showBitwardenMessage(ctx.window, L"Nothing to copy",
+                                 L"This Bitwarden item does not have a TOTP code.", false);
             return false;
         }
 
-        std::wstring secret = trimCliOutput(result.output);
-        secureClear(result.output);
+        bool resolvedByApi = false;
+        if (secret.empty() && ctx.settings.bitwardenUseServe && ensureServe(ctx.settings))
+        {
+            const std::wstring path = L"/object/" + std::wstring(field) + L"/" + command.data;
+            auto response = callServe(ctx.settings, L"GET", path);
+            if (response && response->ok())
+            {
+                if (auto data = bwResponseString(response->output))
+                {
+                    secret = std::move(*data);
+                    resolvedByApi = true;
+                }
+            }
+            if (response)
+            {
+                secureClear(response->output);
+            }
+        }
+
+        if (secret.empty() && !resolvedByApi)
+        {
+            std::wstring session = sessionSnapshot();
+            BwProcessResult result = runBw({ L"get", field, command.data, L"--raw", L"--nointeraction" },
+                                           { { L"BW_SESSION", session } }, kBwTimeoutMs);
+            secureClear(session);
+            if (!result.started || result.timedOut || result.exitCode != 0)
+            {
+                std::wstring message = result.timedOut ? L"bw get timed out." : trimCliOutput(result.output);
+                secureClear(result.output);
+                if (message.empty())
+                {
+                    message = L"Could not read that Bitwarden field.";
+                }
+                showBitwardenMessage(ctx.window, L"Could not copy secret",
+                                     friendlyBitwardenError(message, L"QuickPal could not read that Bitwarden field."));
+                return false;
+            }
+            secret = trimCliOutput(result.output);
+            secureClear(result.output);
+        }
+
         if (secret.empty())
         {
-            MessageBoxW(ctx.window, L"Bitwarden returned an empty value.", L"QuickPal Bitwarden", MB_OK | MB_ICONINFORMATION);
+            showBitwardenMessage(ctx.window, L"Nothing to copy",
+                                 L"This Bitwarden item does not contain that value.", false);
             return false;
         }
 
@@ -1569,9 +2857,10 @@ private:
     {
         if (command.arg.empty())
         {
-            if (auto item = itemById(command.data); item && !item->uri.empty())
+            const std::wstring uri = itemUriById(command.data);
+            if (!uri.empty())
             {
-                ShellExecuteW(nullptr, L"open", item->uri.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                ShellExecuteW(nullptr, L"open", uri.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 return true;
             }
             return openItem(command);
@@ -1600,8 +2889,9 @@ private:
         return true;
     }
 
-    void lockSession(const Settings& settings, bool runBwLock)
+    void lockSession(const Settings&, bool runBwLock)
     {
+        cancelMetadataRefreshAndWait();
         std::wstring session;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1630,16 +2920,172 @@ private:
     std::vector<unsigned char> pinHash_;
     int pinAttempts_ = 0;
     ULONGLONG nextPinAllowedMs_ = 0;
+    ULONGLONG pinAuthorizedUntilMs_ = 0;
+    bool needsInitialSync_ = false;
+    std::atomic_bool refreshWorkerStarted_{ false };
+    std::atomic_bool refreshCancel_{ false };
+    std::thread refreshWorker_;
+    std::mutex refreshMutex_;
+    std::condition_variable refreshCv_;
+    std::condition_variable refreshDoneCv_;
+    bool refreshStop_ = false;
+    bool refreshPending_ = false;
+    bool refreshRunning_ = false;
+    RefreshRequest refreshRequest_;
+    HANDLE serveProcess_ = nullptr;
+    HANDLE serveJob_ = nullptr;
+    DWORD serveProcessId_ = 0;
+    USHORT servePort_ = 0;
+    ULONGLONG serveDeadlineMs_ = 0;
+    std::wstring serveAuthToken_;
 };
 
 struct PromptState
 {
-    const wchar_t* label = L"";
+    std::wstring title;
+    std::wstring label;
     HWND edit = nullptr;
+    bool secret = true;
+    bool messageOnly = false;
+    bool warning = false;
+    std::wstring initial;
     bool done = false;
     bool ok = false;
     std::wstring value;
+    Theme theme{};
+    HBRUSH backgroundBrush = nullptr;
+    HBRUSH controlBrush = nullptr;
+    HFONT eyebrowFont = nullptr;
+    HFONT titleFont = nullptr;
+    HFONT bodyFont = nullptr;
+    HFONT buttonFont = nullptr;
 };
+
+COLORREF dialogColor(const D2D1_COLOR_F& color)
+{
+    return RGB(static_cast<BYTE>(color.r * 255.0f + 0.5f),
+               static_cast<BYTE>(color.g * 255.0f + 0.5f),
+               static_cast<BYTE>(color.b * 255.0f + 0.5f));
+}
+
+HFONT makeDialogFont(HWND hwnd, int points, int weight)
+{
+    const UINT dpi = GetDpiForWindow(hwnd);
+    return CreateFontW(-MulDiv(points, dpi ? dpi : 96, 72), 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+// Every dialog coordinate below is authored at 96 DPI and scaled through here, so
+// the boxes track the fonts instead of drifting out from under them.
+int scaleForDpi(int value, UINT dpi)
+{
+    return MulDiv(value, static_cast<int>(dpi ? dpi : 96), 96);
+}
+
+struct PromptLayout
+{
+    UINT dpi = 96;
+    RECT accentBar{};
+    RECT eyebrow{};
+    RECT title{};
+    RECT label{};
+    RECT edit{};
+    RECT ok{};
+    RECT cancel{};
+    int buttonRadius = 12;
+};
+
+// Positions derive from the live client rect, never from the requested window
+// size: the modal frame takes a few pixels, and right-aligned controls sized
+// against the outer width hang off the edge.
+PromptLayout computePromptLayout(UINT dpi, int clientWidth, int clientHeight, bool messageOnly)
+{
+    PromptLayout layout;
+    layout.dpi = dpi;
+    layout.buttonRadius = scaleForDpi(12, dpi);
+
+    const int pad = scaleForDpi(24, dpi);
+    const int right = clientWidth - pad;
+    const int buttonHeight = scaleForDpi(34, dpi);
+    const int buttonTop = clientHeight - pad - buttonHeight;
+
+    layout.accentBar = RECT{ 0, 0, clientWidth, scaleForDpi(4, dpi) };
+    layout.eyebrow = RECT{ pad, scaleForDpi(20, dpi), right, scaleForDpi(40, dpi) };
+    layout.title = RECT{ pad, scaleForDpi(43, dpi), right, scaleForDpi(72, dpi) };
+
+    if (messageOnly)
+    {
+        layout.label = RECT{ pad, scaleForDpi(83, dpi), right, buttonTop - scaleForDpi(12, dpi) };
+        const int width = scaleForDpi(104, dpi);
+        layout.ok = RECT{ right - width, buttonTop, right, buttonTop + buttonHeight };
+    }
+    else
+    {
+        layout.label = RECT{ pad, scaleForDpi(80, dpi), right, scaleForDpi(102, dpi) };
+        const int editTop = scaleForDpi(108, dpi);
+        layout.edit = RECT{ pad, editTop, right, editTop + scaleForDpi(36, dpi) };
+        const int width = scaleForDpi(82, dpi);
+        const int gap = scaleForDpi(6, dpi);
+        layout.cancel = RECT{ right - width, buttonTop, right, buttonTop + buttonHeight };
+        layout.ok = RECT{ layout.cancel.left - gap - width, buttonTop,
+                          layout.cancel.left - gap, buttonTop + buttonHeight };
+    }
+
+    return layout;
+}
+
+PromptLayout promptLayoutFor(HWND hwnd, bool messageOnly)
+{
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    return computePromptLayout(GetDpiForWindow(hwnd), client.right - client.left,
+                               client.bottom - client.top, messageOnly);
+}
+
+// AdjustWindowRectExForDpi needs Windows 10 1607; fall back to the system-DPI
+// version rather than guessing the frame thickness.
+void adjustWindowRectForDpi(RECT& rect, DWORD style, DWORD exStyle, UINT dpi)
+{
+    using AdjustForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static const auto adjustForDpi = reinterpret_cast<AdjustForDpi>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi")));
+    if (adjustForDpi)
+    {
+        adjustForDpi(&rect, style, FALSE, exStyle, dpi);
+        return;
+    }
+    AdjustWindowRectEx(&rect, style, FALSE, exStyle);
+}
+
+void drawDialogButton(const DRAWITEMSTRUCT& item, PromptState& state)
+{
+    const bool primary = item.CtlID == IDOK;
+    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const D2D1_COLOR_F background = primary
+        ? (pressed ? mixColor(state.theme.accent, state.theme.windowBg, 0.22f) : state.theme.accent)
+        : (pressed ? state.theme.controlPressed : state.theme.controlBg);
+    HBRUSH brush = CreateSolidBrush(dialogColor(background));
+    HPEN pen = CreatePen(PS_SOLID, 1, dialogColor(primary ? state.theme.accent : state.theme.divider));
+    HGDIOBJ oldBrush = SelectObject(item.hDC, brush);
+    HGDIOBJ oldPen = SelectObject(item.hDC, pen);
+    const int radius = scaleForDpi(12, GetDpiForWindow(item.hwndItem));
+    RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom,
+              radius, radius);
+    SelectObject(item.hDC, oldPen);
+    SelectObject(item.hDC, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+
+    wchar_t text[32]{};
+    GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
+    SetBkMode(item.hDC, TRANSPARENT);
+    SetTextColor(item.hDC, dialogColor(primary ? state.theme.onAccent : state.theme.controlText));
+    HGDIOBJ oldFont = SelectObject(item.hDC, state.buttonFont);
+    RECT label = item.rcItem;
+    DrawTextW(item.hDC, text, -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(item.hDC, oldFont);
+}
 
 LRESULT CALLBACK promptProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -1653,33 +3099,128 @@ LRESULT CALLBACK promptProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
     {
         state = reinterpret_cast<PromptState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        HWND label = CreateWindowW(L"STATIC", state ? state->label : L"", WS_CHILD | WS_VISIBLE,
-                                   16, 14, 320, 20, hwnd, nullptr, nullptr, nullptr);
-        HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_PASSWORD | ES_AUTOHSCROLL,
-                                    16, 42, 320, 24, hwnd, reinterpret_cast<HMENU>(100), nullptr, nullptr);
-        HWND ok = CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                176, 78, 76, 26, hwnd, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
-        HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE,
-                                    260, 78, 76, 26, hwnd, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
-        SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        if (state)
+        if (!state)
         {
-            state->edit = edit;
+            return -1;
         }
-        SetFocus(edit);
+        state->eyebrowFont = makeDialogFont(hwnd, 9, FW_SEMIBOLD);
+        state->titleFont = makeDialogFont(hwnd, 17, FW_SEMIBOLD);
+        state->bodyFont = makeDialogFont(hwnd, 10, FW_NORMAL);
+        state->buttonFont = makeDialogFont(hwnd, 10, FW_SEMIBOLD);
+        state->backgroundBrush = CreateSolidBrush(dialogColor(state->theme.windowBg));
+        state->controlBrush = CreateSolidBrush(dialogColor(state->theme.controlBg));
+
+        const PromptLayout layout = promptLayoutFor(hwnd, state->messageOnly);
+
+        if (!state->messageOnly)
+        {
+            const DWORD editStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL |
+                (state->secret ? ES_PASSWORD : 0);
+            state->edit = CreateWindowW(L"EDIT", L"", editStyle,
+                                        layout.edit.left, layout.edit.top,
+                                        layout.edit.right - layout.edit.left,
+                                        layout.edit.bottom - layout.edit.top,
+                                        hwnd, reinterpret_cast<HMENU>(100), nullptr, nullptr);
+            SendMessageW(state->edit, WM_SETFONT, reinterpret_cast<WPARAM>(state->bodyFont), TRUE);
+            const int editMargin = scaleForDpi(10, layout.dpi);
+            SendMessageW(state->edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                         MAKELPARAM(editMargin, editMargin));
+            SetWindowTextW(state->edit, state->initial.c_str());
+            SendMessageW(state->edit, EM_SETSEL, 0, -1);
+        }
+
+        HWND ok = CreateWindowW(L"BUTTON", L"Continue", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                layout.ok.left, layout.ok.top,
+                                layout.ok.right - layout.ok.left, layout.ok.bottom - layout.ok.top,
+                                hwnd, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
+        SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(state->buttonFont), TRUE);
+        if (!state->messageOnly)
+        {
+            HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                        layout.cancel.left, layout.cancel.top,
+                                        layout.cancel.right - layout.cancel.left,
+                                        layout.cancel.bottom - layout.cancel.top,
+                                        hwnd, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
+            SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(state->buttonFont), TRUE);
+            SetFocus(state->edit);
+        }
+        else
+        {
+            SetWindowTextW(ok, L"OK");
+            SetFocus(ok);
+        }
         return 0;
     }
+    case WM_PAINT:
+        if (state)
+        {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(hwnd, &paint);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            FillRect(dc, &client, state->backgroundBrush);
+            const PromptLayout layout = promptLayoutFor(hwnd, state->messageOnly);
+
+            HBRUSH accent = CreateSolidBrush(dialogColor(state->theme.accent));
+            RECT accentBar = layout.accentBar;
+            FillRect(dc, &accentBar, accent);
+            DeleteObject(accent);
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, dialogColor(state->theme.accent));
+            HGDIOBJ oldFont = SelectObject(dc, state->eyebrowFont);
+            RECT eyebrow = layout.eyebrow;
+            DrawTextW(dc, L"QUICKPAL  ·  BITWARDEN", -1, &eyebrow, DT_LEFT | DT_SINGLELINE);
+
+            SetTextColor(dc, dialogColor(state->theme.textPrimary));
+            SelectObject(dc, state->titleFont);
+            RECT titleRect = layout.title;
+            DrawTextW(dc, state->title.c_str(), -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SetTextColor(dc, dialogColor(state->theme.textSecondary));
+            SelectObject(dc, state->bodyFont);
+            RECT labelRect = layout.label;
+            DrawTextW(dc, state->label.c_str(), -1, &labelRect,
+                      state->messageOnly ? (DT_LEFT | DT_WORDBREAK) : (DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS));
+
+            HPEN border = CreatePen(PS_SOLID, 1, dialogColor(state->theme.border));
+            HGDIOBJ oldPen = SelectObject(dc, border);
+            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Rectangle(dc, 0, 0, client.right, client.bottom);
+            SelectObject(dc, oldBrush);
+            SelectObject(dc, oldPen);
+            DeleteObject(border);
+            SelectObject(dc, oldFont);
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+        if (state)
+        {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(dc, dialogColor(state->theme.controlText));
+            SetBkColor(dc, dialogColor(state->theme.controlBg));
+            return reinterpret_cast<LRESULT>(state->controlBrush);
+        }
+        break;
+    case WM_DRAWITEM:
+        if (state)
+        {
+            drawDialogButton(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam), *state);
+            return TRUE;
+        }
+        break;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK && state)
         {
-            const int length = GetWindowTextLengthW(state->edit);
-            state->value.assign(static_cast<size_t>(length) + 1, L'\0');
-            GetWindowTextW(state->edit, state->value.data(), length + 1);
-            state->value.resize(static_cast<size_t>(length));
+            if (!state->messageOnly)
+            {
+                const int length = GetWindowTextLengthW(state->edit);
+                state->value.assign(static_cast<size_t>(length) + 1, L'\0');
+                GetWindowTextW(state->edit, state->value.data(), length + 1);
+                state->value.resize(static_cast<size_t>(length));
+            }
             state->ok = true;
             state->done = true;
             DestroyWindow(hwnd);
@@ -1712,11 +3253,22 @@ LRESULT CALLBACK promptProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         DestroyWindow(hwnd);
         return 0;
+    case WM_DESTROY:
+        if (state)
+        {
+            if (state->backgroundBrush) DeleteObject(state->backgroundBrush);
+            if (state->controlBrush) DeleteObject(state->controlBrush);
+            if (state->eyebrowFont) DeleteObject(state->eyebrowFont);
+            if (state->titleFont) DeleteObject(state->titleFont);
+            if (state->bodyFont) DeleteObject(state->bodyFont);
+            if (state->buttonFont) DeleteObject(state->buttonFont);
+        }
+        return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-std::optional<std::wstring> promptSecret(HWND owner, const wchar_t* title, const wchar_t* label)
+ATOM ensurePromptClass()
 {
     static ATOM atom = 0;
     if (!atom)
@@ -1726,40 +3278,56 @@ std::optional<std::wstring> promptSecret(HWND owner, const wchar_t* title, const
         wc.lpfnWndProc = promptProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.hbrBackground = nullptr;
+        wc.style = CS_DROPSHADOW;
         wc.lpszClassName = L"QuickPal.BitwardenPrompt";
         atom = RegisterClassExW(&wc);
     }
+    return atom;
+}
 
-    PromptState state;
-    state.label = label;
+bool runBitwardenDialog(HWND owner, PromptState& state, int clientWidth, int clientHeight)
+{
+    if (!ensurePromptClass())
+    {
+        return false;
+    }
+
+    const UINT dpi = owner ? GetDpiForWindow(owner) : GetDpiForSystem();
+    const DWORD style = WS_POPUP;
+    // The palette itself is topmost, so a plain popup would open behind it.
+    const DWORD exStyle = WS_EX_DLGMODALFRAME | WS_EX_TOPMOST;
+
+    // Callers size the content; the frame is added on top so the interior really
+    // is the size the layout was authored for.
+    RECT frame{ 0, 0, scaleForDpi(clientWidth, dpi), scaleForDpi(clientHeight, dpi) };
+    adjustWindowRectForDpi(frame, style, exStyle, dpi);
+    const int width = frame.right - frame.left;
+    const int height = frame.bottom - frame.top;
 
     RECT ownerRect{};
     if (!owner || !GetWindowRect(owner, &ownerRect))
     {
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &ownerRect, 0);
     }
-    const int width = 368;
-    const int height = 150;
     const int x = static_cast<int>(ownerRect.left) +
         std::max<int>(0, (static_cast<int>(ownerRect.right - ownerRect.left) - width) / 2);
     const int y = static_cast<int>(ownerRect.top) +
         std::max<int>(0, (static_cast<int>(ownerRect.bottom - ownerRect.top) - height) / 2);
 
-    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
-                                L"QuickPal.BitwardenPrompt", title,
-                                WS_CAPTION | WS_SYSMENU | WS_POPUP,
+    HWND hwnd = CreateWindowExW(exStyle,
+                                L"QuickPal.BitwardenPrompt", L"QuickPal Bitwarden", style,
                                 x, y, width, height, owner, nullptr, GetModuleHandleW(nullptr), &state);
     if (!hwnd)
     {
-        return std::nullopt;
+        return false;
     }
-
     if (owner)
     {
         EnableWindow(owner, FALSE);
     }
     ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd);
     UpdateWindow(hwnd);
 
     MSG msg{};
@@ -1776,13 +3344,40 @@ std::optional<std::wstring> promptSecret(HWND owner, const wchar_t* title, const
         EnableWindow(owner, TRUE);
         SetForegroundWindow(owner);
     }
+    return state.ok;
+}
 
-    if (!state.ok)
+std::optional<std::wstring> promptValue(HWND owner, const wchar_t* title, const wchar_t* label,
+                                        bool secret, const std::wstring& initial)
+{
+    PromptState state;
+    state.title = title;
+    state.label = label;
+    state.secret = secret;
+    state.initial = initial;
+    state.theme = resolveTheme(getSettingsSnapshot());
+    if (!runBitwardenDialog(owner, state, 480, 228))
     {
         secureClear(state.value);
         return std::nullopt;
     }
     return state.value;
+}
+
+std::optional<std::wstring> promptSecret(HWND owner, const wchar_t* title, const wchar_t* label)
+{
+    return promptValue(owner, title, label, true);
+}
+
+void showBitwardenMessage(HWND owner, const wchar_t* title, const std::wstring& message, bool warning)
+{
+    PromptState state;
+    state.title = title;
+    state.label = message;
+    state.messageOnly = true;
+    state.warning = warning;
+    state.theme = resolveTheme(getSettingsSnapshot());
+    runBitwardenDialog(owner, state, 520, 244);
 }
 }
 
