@@ -5,6 +5,7 @@
 #include "../../ui/theme.h"
 
 #include <bcrypt.h>
+#include <dwmapi.h>
 #include <asyncinfo.h>
 #include <shellapi.h>
 #include <wincrypt.h>
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <future>
 #include <mutex>
 #include <limits>
 #include <optional>
@@ -2084,11 +2086,16 @@ private:
         {
             return false;
         }
+        return loginWithPassword(ctx, email, *password);
+    }
 
+    // Consumes (and clears) the password.
+    bool loginWithPassword(const ProviderContext& ctx, std::wstring& email, std::wstring& password)
+    {
         ctx.reportStatus(kProviderId, L"Signing in...");
         BwProcessResult result = runBw({ L"login", email, L"--raw", L"--passwordenv", L"QUICKPAL_BW_PASSWORD", L"--nointeraction" },
-                                       { { L"QUICKPAL_BW_PASSWORD", *password } }, kBwUnlockTimeoutMs);
-        secureClear(*password);
+                                       { { L"QUICKPAL_BW_PASSWORD", password } }, kBwUnlockTimeoutMs);
+        secureClear(password);
         secureClear(email);
         if (!result.started || result.timedOut || result.exitCode != 0)
         {
@@ -2160,7 +2167,24 @@ private:
 
         if (!hadActiveSession)
         {
-            BwProcessResult cliStatus = runBw({ L"status", L"--nointeraction" }, {}, kBwTimeoutMs);
+            if (findBwExe().empty())
+            {
+                showBitwardenMessage(ctx.window, L"Bitwarden CLI not found",
+                                     L"Install the Bitwarden CLI before unlocking.", false);
+                ShellExecuteW(nullptr, L"open", kInstallUrl, nullptr, nullptr, SW_SHOWNORMAL);
+                return false;
+            }
+
+            // The CLI takes ~1s to cold-start, so the status query runs while the
+            // prompt is already open; by the time the password is typed the answer
+            // is waiting and the dialog appears instantly.
+            auto statusFuture = std::async(std::launch::async, [this] {
+                return runBw({ L"status", L"--nointeraction" }, {}, kBwTimeoutMs);
+            });
+
+            auto password = promptSecret(ctx.window, L"Unlock Bitwarden", L"Bitwarden master password");
+
+            BwProcessResult cliStatus = statusFuture.get();
             bool unauthenticated = false;
             if (cliStatus.exitCode == 0)
             {
@@ -2177,11 +2201,35 @@ private:
                 }
             }
             secureClear(cliStatus.output);
+
+            if (!password || password->empty())
+            {
+                return false;
+            }
             if (unauthenticated)
             {
-                return loginNative(ctx);
+                // The typed master password doubles as the login password, so only
+                // the account email may still be missing.
+                std::wstring email = ctx.settings.bitwardenAccountEmail;
+                if (email.empty())
+                {
+                    auto entered = promptValue(ctx.window, L"Bitwarden sign in", L"Account email", false);
+                    if (!entered)
+                    {
+                        secureClear(*password);
+                        return false;
+                    }
+                    email = trimCliOutput(std::move(*entered));
+                    if (email.empty())
+                    {
+                        secureClear(*password);
+                        return false;
+                    }
+                    setBitwardenAccountEmail(email);
+                }
+                return loginWithPassword(ctx, email, *password);
             }
-            if (!unlockWithMasterPassword(ctx))
+            if (!unlockWithPassword(ctx, *password))
             {
                 return false;
             }
@@ -2247,11 +2295,16 @@ private:
         {
             return false;
         }
+        return unlockWithPassword(ctx, *password);
+    }
 
+    // Consumes (and clears) the password.
+    bool unlockWithPassword(const ProviderContext& ctx, std::wstring& password)
+    {
         ctx.reportStatus(kProviderId, L"Unlocking the local vault...");
         BwProcessResult result = runBw({ L"unlock", L"--raw", L"--passwordenv", L"QUICKPAL_BW_PASSWORD", L"--nointeraction" },
-                                       { { L"QUICKPAL_BW_PASSWORD", *password } }, kBwUnlockTimeoutMs);
-        secureClear(*password);
+                                       { { L"QUICKPAL_BW_PASSWORD", password } }, kBwUnlockTimeoutMs);
+        secureClear(password);
         if (!result.started || result.timedOut || result.exitCode != 0)
         {
             const std::wstring raw = trimCliOutput(result.output);
@@ -3043,6 +3096,18 @@ PromptLayout promptLayoutFor(HWND hwnd, bool messageOnly)
                                client.bottom - client.top, messageOnly);
 }
 
+// Same chrome as the palette window: DWM rounded corners and a themed border
+// instead of the raised 3D dialog frame.
+void applyPromptChrome(HWND hwnd, const Theme& theme)
+{
+    DWORD corner = 2; // DWMWCP_ROUND
+    DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &corner, sizeof(corner));
+    BOOL dark = theme.dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    COLORREF border = dialogColor(theme.border);
+    DwmSetWindowAttribute(hwnd, 34 /*DWMWA_BORDER_COLOR*/, &border, sizeof(border));
+}
+
 // AdjustWindowRectExForDpi needs Windows 10 1607; fall back to the system-DPI
 // version rather than guessing the frame thickness.
 void adjustWindowRectForDpi(RECT& rect, DWORD style, DWORD exStyle, UINT dpi)
@@ -3065,6 +3130,12 @@ void drawDialogButton(const DRAWITEMSTRUCT& item, PromptState& state)
     const D2D1_COLOR_F background = primary
         ? (pressed ? mixColor(state.theme.accent, state.theme.windowBg, 0.22f) : state.theme.accent)
         : (pressed ? state.theme.controlPressed : state.theme.controlBg);
+    // Owner-draw leaves the control's default background in the corners the
+    // rounding cuts away, so flood the whole rect with the dialog surface first.
+    HBRUSH surface = CreateSolidBrush(dialogColor(state.theme.windowBg));
+    FillRect(item.hDC, &item.rcItem, surface);
+    DeleteObject(surface);
+
     HBRUSH brush = CreateSolidBrush(dialogColor(background));
     HPEN pen = CreatePen(PS_SOLID, 1, dialogColor(primary ? state.theme.accent : state.theme.divider));
     HGDIOBJ oldBrush = SelectObject(item.hDC, brush);
@@ -3116,15 +3187,26 @@ LRESULT CALLBACK promptProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             const DWORD editStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL |
                 (state->secret ? ES_PASSWORD : 0);
+            // A single-line EDIT top-aligns its text, so the child is created at
+            // exactly the font's height and centered inside the drawn field box.
+            TEXTMETRICW tm{};
+            {
+                HDC dc = GetDC(hwnd);
+                HGDIOBJ old = SelectObject(dc, state->bodyFont);
+                GetTextMetricsW(dc, &tm);
+                SelectObject(dc, old);
+                ReleaseDC(hwnd, dc);
+            }
+            const int pad = scaleForDpi(12, layout.dpi);
+            const int fieldHeight = layout.edit.bottom - layout.edit.top;
+            const int textHeight = std::min<int>(tm.tmHeight, fieldHeight);
+            const int textTop = layout.edit.top + (fieldHeight - textHeight) / 2;
             state->edit = CreateWindowW(L"EDIT", L"", editStyle,
-                                        layout.edit.left, layout.edit.top,
-                                        layout.edit.right - layout.edit.left,
-                                        layout.edit.bottom - layout.edit.top,
+                                        layout.edit.left + pad, textTop,
+                                        layout.edit.right - layout.edit.left - 2 * pad,
+                                        textHeight,
                                         hwnd, reinterpret_cast<HMENU>(100), nullptr, nullptr);
             SendMessageW(state->edit, WM_SETFONT, reinterpret_cast<WPARAM>(state->bodyFont), TRUE);
-            const int editMargin = scaleForDpi(10, layout.dpi);
-            SendMessageW(state->edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
-                         MAKELPARAM(editMargin, editMargin));
             SetWindowTextW(state->edit, state->initial.c_str());
             SendMessageW(state->edit, EM_SETSEL, 0, -1);
         }
@@ -3183,16 +3265,31 @@ LRESULT CALLBACK promptProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             DrawTextW(dc, state->label.c_str(), -1, &labelRect,
                       state->messageOnly ? (DT_LEFT | DT_WORDBREAK) : (DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS));
 
-            HPEN border = CreatePen(PS_SOLID, 1, dialogColor(state->theme.border));
-            HGDIOBJ oldPen = SelectObject(dc, border);
-            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-            Rectangle(dc, 0, 0, client.right, client.bottom);
-            SelectObject(dc, oldBrush);
-            SelectObject(dc, oldPen);
-            DeleteObject(border);
+            // The DWM border replaces the old full-window Rectangle outline; the
+            // only chrome painted here is the input field's rounded box.
+            if (!state->messageOnly)
+            {
+                HPEN fieldPen = CreatePen(PS_SOLID, 1, dialogColor(state->theme.border));
+                HBRUSH fieldBrush = CreateSolidBrush(dialogColor(state->theme.controlBg));
+                HGDIOBJ oldPen = SelectObject(dc, fieldPen);
+                HGDIOBJ oldBrush = SelectObject(dc, fieldBrush);
+                const int radius = scaleForDpi(8, layout.dpi);
+                RoundRect(dc, layout.edit.left, layout.edit.top,
+                          layout.edit.right, layout.edit.bottom, radius, radius);
+                SelectObject(dc, oldBrush);
+                SelectObject(dc, oldPen);
+                DeleteObject(fieldBrush);
+                DeleteObject(fieldPen);
+            }
             SelectObject(dc, oldFont);
             EndPaint(hwnd, &paint);
             return 0;
+        }
+        break;
+    case WM_CTLCOLORBTN:
+        if (state)
+        {
+            return reinterpret_cast<LRESULT>(state->backgroundBrush);
         }
         break;
     case WM_CTLCOLOREDIT:
@@ -3296,7 +3393,8 @@ bool runBitwardenDialog(HWND owner, PromptState& state, int clientWidth, int cli
     const UINT dpi = owner ? GetDpiForWindow(owner) : GetDpiForSystem();
     const DWORD style = WS_POPUP;
     // The palette itself is topmost, so a plain popup would open behind it.
-    const DWORD exStyle = WS_EX_DLGMODALFRAME | WS_EX_TOPMOST;
+    // No WS_EX_DLGMODALFRAME: chrome comes from DWM, matching the palette.
+    const DWORD exStyle = WS_EX_TOPMOST;
 
     // Callers size the content; the frame is added on top so the interior really
     // is the size the layout was authored for.
@@ -3322,6 +3420,7 @@ bool runBitwardenDialog(HWND owner, PromptState& state, int clientWidth, int cli
     {
         return false;
     }
+    applyPromptChrome(hwnd, state.theme);
     if (owner)
     {
         EnableWindow(owner, FALSE);

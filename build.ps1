@@ -28,6 +28,7 @@ $versionHeaderLines = @(
 
 $Res = Join-Path $Bin "QuickPal.res"
 $Exe = Join-Path $Bin "QuickPal.exe"
+$StagedExe = Join-Path $Bin "QuickPal.build.exe"
 $BenchExe = Join-Path $Bin "QuickPalBench.exe"
 $NativeHostExe = Join-Path $Bin "QuickPalChromeHost.exe"
 $ExtensionDir = Join-Path $Root "chrome-extension"
@@ -89,6 +90,10 @@ if ($LASTEXITCODE -ne 0 -or -not $bitwardenServeHelp.Contains("--auth-token-env"
 Copy-Item -LiteralPath $BitwardenVendorExe -Destination $BundledBitwardenExe -Force
 Write-Host "Staged source-built QuickPal Bitwarden CLI $BitwardenVersion ($($BitwardenCommit.Substring(0, 12)))"
 
+if (Test-Path -LiteralPath $StagedExe -PathType Leaf) {
+  Remove-Item -LiteralPath $StagedExe -Force
+}
+
 & windres -I $Bin (Join-Path $Src "QuickPal.rc") -O coff -o $Res
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -115,7 +120,7 @@ $CompilerArgs = @(
 ) + $Sources + @(
   $Res
   "-o"
-  $Exe
+  $StagedExe
   # Direct2D / DirectWrite / WIC replace the old GDI drawing path.
   "-ld2d1"
   "-ldwrite"
@@ -143,6 +148,11 @@ $CompilerArgs = @(
 & g++ @CompilerArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Compile away from the live executable, then make the interruption only as long
+# as the final replacement. This avoids linker failures when the tray app is
+# reopened while a build is still compiling.
+Stop-BuildOutputProcess "QuickPal" $Exe
+Move-Item -LiteralPath $StagedExe -Destination $Exe -Force
 Write-Host "Built $Exe"
 
 $BenchSources = Get-ChildItem -Path (Join-Path $Src "core") -Recurse -Filter *.cpp |
@@ -165,6 +175,7 @@ $BenchArgs = @(
   "-o"
   $BenchExe
   "-lwinhttp"
+  "-ldwmapi"
   "-luuid"
   "-lpsapi"
   "-lole32"
